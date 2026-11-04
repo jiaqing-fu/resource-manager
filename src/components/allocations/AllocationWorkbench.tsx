@@ -22,12 +22,19 @@ import { DeleteOutlined, PlusOutlined } from "@ant-design/icons";
 import { partyOptions } from "@/components/PartySelect";
 import { apiFetch, errorMessage } from "@/lib/client";
 import { ALLOCATION_RESOURCE_TYPES, labelOf } from "@/lib/enums";
+import {
+  ipv4LongToIp,
+  ipv4ToLong,
+  MAX_RANGE_ALLOCATION_ADDRESSES,
+  parseIpRange,
+} from "@/lib/ip";
 import { rangesOverlap, rangeWithin, subtractRanges } from "@/lib/ranges";
 import type { OptionsData, ResourceAllocation } from "@/lib/types";
 
 const RESOURCE_ORDER = [
   "ipAddress",
   "ipBlock",
+  "ipRange",
   "rack",
   "device",
   "vlan",
@@ -59,6 +66,19 @@ type AllocationOption = {
     uEnd: number;
   }>;
   freeRanges?: Array<{ start: number; end: number }>;
+  blockId?: string;
+  blockName?: string;
+  kind?: string;
+  rangeStart?: string | null;
+  rangeEnd?: string | null;
+  occupiedIpRanges?: Array<{
+    allocationId: string;
+    customerId: string;
+    customerName: string;
+    startIp: string;
+    endIp: string;
+  }>;
+  freeIpRanges?: Array<{ startIp: string; endIp: string }>;
 };
 
 type WorkspaceAllocation = ResourceAllocation & { currentResourceName: string };
@@ -75,6 +95,8 @@ type DraftCreate = {
   resourceId?: string;
   uStart?: number | null;
   uEnd?: number | null;
+  ipRangeStart?: string | null;
+  ipRangeEnd?: string | null;
   allocatedMbps?: number | null;
 };
 
@@ -119,6 +141,86 @@ function effectiveFreeRanges(
   return subtractRanges({ start: option.uStart, end: option.uEnd }, occupied);
 }
 
+type IpFreeRange = { startIp: string; endIp: string; startLong: number; endLong: number };
+
+function effectiveFreeIpRanges(
+  option: AllocationOption,
+  releasedAllocationIds: Set<string>,
+): IpFreeRange[] {
+  if (!option.rangeStart || !option.rangeEnd) return [];
+  const block = parseIpRange(`${option.rangeStart}-${option.rangeEnd}`);
+  if (!block || block.startLong === null || block.endLong === null) return [];
+  const occupied = (option.occupiedIpRanges ?? [])
+    .filter((range) => !releasedAllocationIds.has(range.allocationId))
+    .flatMap((range) => {
+      const parsed = parseIpRange(`${range.startIp}-${range.endIp}`);
+      if (!parsed || parsed.startLong === null || parsed.endLong === null) return [];
+      return [{ start: parsed.startLong, end: parsed.endLong }];
+    });
+  return subtractRanges(
+    { start: block.startLong, end: block.endLong },
+    occupied,
+  ).map((range) => ({
+    startIp: ipv4LongToIp(range.start),
+    endIp: ipv4LongToIp(range.end),
+    startLong: range.start,
+    endLong: range.end,
+  }));
+}
+
+function defaultIpRange(free: IpFreeRange[]): { start: string; end: string } | null {
+  const first = free[0];
+  if (!first) return null;
+  const end = Math.min(
+    first.endLong,
+    first.startLong + MAX_RANGE_ALLOCATION_ADDRESSES - 1,
+  );
+  return { start: ipv4LongToIp(first.startLong), end: ipv4LongToIp(end) };
+}
+
+function ipRangeError(
+  type: ResourceType,
+  option: AllocationOption | undefined,
+  draft: DraftCreate,
+  releasedAllocationIds: Set<string>,
+): string | null {
+  if (type !== "ipRange") return null;
+  if (!option) return draft.resourceId ? "IP 段数据不存在，请刷新" : null;
+  if (!draft.ipRangeStart || !draft.ipRangeEnd) return null;
+  const start = ipv4ToLong(draft.ipRangeStart);
+  const end = ipv4ToLong(draft.ipRangeEnd);
+  if (start === null || end === null) return "起止 IP 必须是合法的 IPv4 地址";
+  if (start > end) return "结束 IP 不能小于起始 IP";
+  if (end - start + 1 > MAX_RANGE_ALLOCATION_ADDRESSES) {
+    return `单次最多分配 ${MAX_RANGE_ALLOCATION_ADDRESSES} 个地址`;
+  }
+  if (!option.rangeStart || !option.rangeEnd) return "所选 IP 段没有可分配范围";
+  const block = parseIpRange(`${option.rangeStart}-${option.rangeEnd}`);
+  if (
+    !block ||
+    block.startLong === null ||
+    block.endLong === null ||
+    start < block.startLong ||
+    end > block.endLong
+  ) {
+    return `分配区间必须位于 ${option.name} 内`;
+  }
+  const occupied = (option.occupiedIpRanges ?? []).find((range) => {
+    if (releasedAllocationIds.has(range.allocationId)) return false;
+    const parsed = parseIpRange(`${range.startIp}-${range.endIp}`);
+    return (
+      parsed !== null &&
+      parsed.startLong !== null &&
+      parsed.endLong !== null &&
+      rangesOverlap(start, end, parsed.startLong, parsed.endLong)
+    );
+  });
+  if (occupied) {
+    return `与已有区间分配 ${occupied.startIp}-${occupied.endIp}（${occupied.customerName || "其他客户"}）重叠`;
+  }
+  return null;
+}
+
 function DraftRow({
   type,
   draft,
@@ -136,6 +238,9 @@ function DraftRow({
 }) {
   const option = options.find((item) => item.id === draft.resourceId);
   const freeRanges = option ? effectiveFreeRanges(option, releasedAllocationIds) : [];
+  const ipFreeRanges =
+    option && type === "ipRange" ? effectiveFreeIpRanges(option, releasedAllocationIds) : [];
+  const rangeError = ipRangeError(type, option, draft, releasedAllocationIds);
   const rackError =
     type === "rack" &&
     option &&
@@ -178,9 +283,27 @@ function DraftRow({
                 resourceId: value,
                 uStart: free[0]?.start ?? next.uStart ?? null,
                 uEnd: free[0]?.end ?? next.uStart ?? null,
+                ipRangeStart: null,
+                ipRangeEnd: null,
+              });
+            } else if (type === "ipRange" && next) {
+              const free = effectiveFreeIpRanges(next, releasedAllocationIds);
+              const preset = defaultIpRange(free);
+              onChange({
+                resourceId: value,
+                uStart: null,
+                uEnd: null,
+                ipRangeStart: preset?.start ?? null,
+                ipRangeEnd: preset?.end ?? null,
               });
             } else {
-              onChange({ resourceId: value, uStart: null, uEnd: null });
+              onChange({
+                resourceId: value,
+                uStart: null,
+                uEnd: null,
+                ipRangeStart: null,
+                ipRangeEnd: null,
+              });
             }
           }}
         />
@@ -206,6 +329,23 @@ function DraftRow({
             />
           </>
         ) : null}
+        {type === "ipRange" ? (
+          <>
+            <Input
+              placeholder="起始 IP"
+              style={{ width: 150 }}
+              value={draft.ipRangeStart ?? ""}
+              onChange={(event) => onChange({ ipRangeStart: event.target.value || null })}
+            />
+            <span>—</span>
+            <Input
+              placeholder="结束 IP"
+              style={{ width: 150 }}
+              value={draft.ipRangeEnd ?? ""}
+              onChange={(event) => onChange({ ipRangeEnd: event.target.value || null })}
+            />
+          </>
+        ) : null}
         {type === "broadband" ? (
           <InputNumber
             min={1}
@@ -228,6 +368,20 @@ function DraftRow({
         <div className={rackError ? "rm-allocation-hint rm-allocation-error" : "rm-allocation-hint"}>
           {rackError ??
             `可选区间：${freeRanges.length > 0 ? freeRanges.map((r) => rangeText(r.start, r.end)).join("、") : "暂无空闲（可先释放已有分配）"}`}
+        </div>
+      ) : null}
+      {type === "ipRange" && option ? (
+        <div className={rangeError ? "rm-allocation-hint rm-allocation-error" : "rm-allocation-hint"}>
+          {rangeError ??
+            `可分配范围：${
+              ipFreeRanges.length > 0
+                ? ipFreeRanges
+                    .slice(0, 3)
+                    .map((range) => `${range.startIp}-${range.endIp}`)
+                    .join("、") +
+                  (ipFreeRanges.length > 3 ? ` 等 ${ipFreeRanges.length} 段` : "")
+                : "暂无空闲（可先释放已有分配）"
+            }；单次最多 ${MAX_RANGE_ALLOCATION_ADDRESSES} 个地址。`}
         </div>
       ) : null}
       {type === "broadband" && option ? (
@@ -415,7 +569,7 @@ function CustomerGroupCard({
     >
       {!group.customerId ? (
         <Typography.Text type="secondary">
-          选择客户后，将列出该客户的 8 类资源当前分配，可用 + / - 增减后一次保存。
+          选择客户后，将列出该客户的 9 类资源当前分配，可用 + / - 增减后一次保存。
         </Typography.Text>
       ) : error ? (
         <Alert type="error" showIcon message={errorMessage(error)} />
@@ -526,6 +680,7 @@ export function AllocationWorkbench({
     const releaseDate = releasedAt ?? dayjs();
     const allocationsById = new Map<string, WorkspaceAllocation>();
     const rackOptions = new Map<string, AllocationOption>();
+    const ipRangeOptions = new Map<string, AllocationOption>();
     for (const group of groups) {
       const workspace = group.customerId
         ? workspaceRef.current.get(group.customerId)
@@ -536,6 +691,9 @@ export function AllocationWorkbench({
       for (const option of workspace?.resources.rack ?? []) {
         rackOptions.set(option.id, option);
       }
+      for (const option of workspace?.resources.ipRange ?? []) {
+        ipRangeOptions.set(option.id, option);
+      }
     }
 
     const seenSingle = new Map<string, string>();
@@ -543,6 +701,11 @@ export function AllocationWorkbench({
       string,
       Array<{ uStart: number; uEnd: number; customerName: string }>
     >();
+    const seenIpRanges: Array<{
+      startLong: number;
+      endLong: number;
+      customerName: string;
+    }> = [];
 
     for (const group of groups) {
       const customerName =
@@ -605,6 +768,52 @@ export function AllocationWorkbench({
           ) {
             return `客户「${customerName}」的宽带分配 MBPS 必须是大于 0 的整数`;
           }
+        } else if (create.resourceType === "ipRange") {
+          const option = ipRangeOptions.get(create.resourceId);
+          if (!option || !option.rangeStart || !option.rangeEnd) {
+            return "IP 区间数据尚未加载完成，请稍候再保存";
+          }
+          const start = ipv4ToLong(create.ipRangeStart ?? "");
+          const end = ipv4ToLong(create.ipRangeEnd ?? "");
+          if (start === null || end === null) {
+            return `客户「${customerName}」的 IP 区间起止地址不合法`;
+          }
+          if (start > end) {
+            return `客户「${customerName}」的 IP 区间结束地址不能小于起始地址`;
+          }
+          if (end - start + 1 > MAX_RANGE_ALLOCATION_ADDRESSES) {
+            return `客户「${customerName}」的单次 IP 区间不能超过 ${MAX_RANGE_ALLOCATION_ADDRESSES} 个地址`;
+          }
+          const block = parseIpRange(`${option.rangeStart}-${option.rangeEnd}`);
+          if (
+            !block ||
+            block.startLong === null ||
+            block.endLong === null ||
+            start < block.startLong ||
+            end > block.endLong
+          ) {
+            return `客户「${customerName}」的分配区间必须位于 ${option.name} 内`;
+          }
+          const occupied = (option.occupiedIpRanges ?? []).find((range) => {
+            if (releasedAllocationIds.has(range.allocationId)) return false;
+            const parsed = parseIpRange(`${range.startIp}-${range.endIp}`);
+            return (
+              parsed !== null &&
+              parsed.startLong !== null &&
+              parsed.endLong !== null &&
+              rangesOverlap(start, end, parsed.startLong, parsed.endLong)
+            );
+          });
+          if (occupied) {
+            return `客户「${customerName}」的 IP 区间与已有分配 ${occupied.startIp}-${occupied.endIp}（${occupied.customerName || "其他客户"}）重叠`;
+          }
+          const conflict = seenIpRanges.find((range) =>
+            rangesOverlap(start, end, range.startLong, range.endLong),
+          );
+          if (conflict) {
+            return `IP 区间与客户「${conflict.customerName}」本次填写的区间重叠`;
+          }
+          seenIpRanges.push({ startLong: start, endLong: end, customerName });
         } else {
           const resourceKey = `${create.resourceType}:${create.resourceId}`;
           const previousCustomer = seenSingle.get(resourceKey);
@@ -638,6 +847,12 @@ export function AllocationWorkbench({
             resourceId: create.resourceId,
             ...(create.resourceType === "rack"
               ? { uStart: create.uStart, uEnd: create.uEnd }
+              : {}),
+            ...(create.resourceType === "ipRange"
+              ? {
+                  ipRangeStart: create.ipRangeStart,
+                  ipRangeEnd: create.ipRangeEnd,
+                }
               : {}),
             ...(create.resourceType === "broadband"
               ? { allocatedMbps: create.allocatedMbps }
@@ -714,8 +929,8 @@ export function AllocationWorkbench({
           </Button>
         </Space>
         <Typography.Paragraph type="secondary" style={{ margin: "8px 0 0" }}>
-          每个客户分组可独立增减 8 类资源；保存时先释放、再新增，多个客户与多项资源在同一事务内提交。
-          机柜分配需选择区间记录并填写起止 U；宽带允许超分。
+          每个客户分组可独立增减 9 类资源；保存时先释放、再新增，多个客户与多项资源在同一事务内提交。
+          机柜分配需选择区间记录并填写起止 U；IP 区间按子区间分配且与单 IP 分配互斥；宽带允许超分。
         </Typography.Paragraph>
       </div>
 

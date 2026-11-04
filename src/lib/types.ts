@@ -146,9 +146,24 @@ export type Vxlan = {
 export type IpBlock = {
   id: string;
   cidr: string;
+  kind: string;
+  rangeStart: string | null;
+  rangeEnd: string | null;
   parentId: string | null;
-  parent?: { id: string; cidr: string } | null;
-  children?: Array<{ id: string; cidr: string }>;
+  parent?: {
+    id: string;
+    cidr: string;
+    kind?: string;
+    rangeStart?: string | null;
+    rangeEnd?: string | null;
+  } | null;
+  children?: Array<{
+    id: string;
+    cidr: string;
+    kind?: string;
+    rangeStart?: string | null;
+    rangeEnd?: string | null;
+  }>;
   ipVersion: number;
   status: string;
   role: string;
@@ -170,6 +185,9 @@ export type IpBlock = {
 export type BlockTreeNode = {
   id: string;
   cidr: string;
+  kind: string;
+  rangeStart: string | null;
+  rangeEnd: string | null;
   status: string;
   role: string;
   parentId: string | null;
@@ -179,6 +197,8 @@ export type BlockTreeNode = {
   customerName: string | null;
   directUsed: number;
   used: number;
+  entered: number;
+  allocated: number;
   total: number | null;
   percent: number | null;
   children: BlockTreeNode[];
@@ -190,7 +210,13 @@ export type IpAddress = {
   status: string;
   role: string;
   blockId: string | null;
-  block?: { id: string; cidr: string } | null;
+  block?: {
+    id: string;
+    cidr: string;
+    kind?: string;
+    rangeStart?: string | null;
+    rangeEnd?: string | null;
+  } | null;
   supplierId: string | null;
   supplier?: IdName | null;
   customerId: string | null;
@@ -374,6 +400,8 @@ export type ResourceAllocation = {
   supplierName: string | null;
   uStart: number | null;
   uEnd: number | null;
+  ipRangeStart: string | null;
+  ipRangeEnd: string | null;
   allocatedMbps: number | null;
   activeKey: string | null;
   rackId: string | null;
@@ -394,7 +422,13 @@ export type ResourceAllocation = {
     uEnd?: number;
     location?: string | null;
   } | null;
-  ipBlock?: { id: string; cidr: string } | null;
+  ipBlock?: {
+    id: string;
+    cidr: string;
+    kind?: string;
+    rangeStart?: string | null;
+    rangeEnd?: string | null;
+  } | null;
   ipAddress?: { id: string; address: string } | null;
   vlan?: { id: string; vid: number; name: string } | null;
   vxlan?: { id: string; vni: number; name: string | null } | null;
@@ -527,6 +561,9 @@ export type OptionsData = {
   ipBlocks: Array<{
     id: string;
     cidr: string;
+    kind: string;
+    rangeStart: string | null;
+    rangeEnd: string | null;
     status: string;
     supplierId: string | null;
     customerId: string | null;

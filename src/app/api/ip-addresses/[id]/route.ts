@@ -3,7 +3,11 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { ApiError, handleApiError, jsonOk, readJson, requireAdmin, requireUser } from "@/lib/api";
 import { ipAddressUpdateSchema } from "@/lib/ip-address-schema";
-import { validateAddressInput } from "@/server/services/ipam";
+import {
+  assertAddressNotInActiveIpRange,
+  recomputeIpCustomersForSpan,
+  validateAddressInput,
+} from "@/server/services/ipam";
 import { resolveSupplierForUpdate } from "@/server/services/supplier-requirements";
 import { assertResourceNotAllocated } from "@/server/services/allocations";
 import { writeChangeLog } from "@/lib/changelog";
@@ -19,7 +23,16 @@ export async function GET(req: NextRequest, { params }: Params) {
     const ip = await prisma.ipAddress.findUnique({
       where: { id },
       include: {
-        block: { select: { id: true, cidr: true, status: true } },
+        block: {
+          select: {
+            id: true,
+            cidr: true,
+            kind: true,
+            rangeStart: true,
+            rangeEnd: true,
+            status: true,
+          },
+        },
         supplier: { select: { id: true, name: true } },
         customer: { select: { id: true, name: true } },
         rack: { select: { id: true, code: true, location: true, uStart: true, uEnd: true } },
@@ -51,6 +64,7 @@ export async function PATCH(req: NextRequest, { params }: Params) {
     const updated = await prisma.$transaction(async (tx) => {
       const existing = await tx.ipAddress.findUnique({ where: { id } });
       if (!existing) throw new ApiError(404, "IP 地址不存在", "NOT_FOUND");
+      await assertAddressNotInActiveIpRange(tx, existing.address);
 
       const enforcedSupplierId = await resolveSupplierForUpdate(
         tx,
@@ -90,6 +104,10 @@ export async function PATCH(req: NextRequest, { params }: Params) {
         where: { id },
         data: data as unknown as Prisma.IpAddressUncheckedUpdateInput,
       });
+      if (existing.address !== ip.address) {
+        await recomputeIpCustomersForSpan(tx, existing.address, existing.address);
+      }
+      await recomputeIpCustomersForSpan(tx, ip.address, ip.address);
       await writeChangeLog(tx, {
         user,
         resource: "ipAddress",
@@ -99,7 +117,7 @@ export async function PATCH(req: NextRequest, { params }: Params) {
         before: existing,
         after: ip,
       });
-      return ip;
+      return tx.ipAddress.findUniqueOrThrow({ where: { id } });
     });
     return jsonOk(updated);
   } catch (error) {
@@ -135,6 +153,7 @@ export async function DELETE(req: NextRequest, { params }: Params) {
           "IN_USE",
         );
       }
+      await assertAddressNotInActiveIpRange(tx, existing.address);
       await assertResourceNotAllocated(tx, "ipAddress", id, `IP ${existing.address}`);
       await tx.ipAddress.delete({ where: { id } });
       await writeChangeLog(tx, {

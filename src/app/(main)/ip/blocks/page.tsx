@@ -53,6 +53,7 @@ import {
   colorOf,
   labelOf,
 } from "@/lib/enums";
+import { MAX_RANGE_ADDRESSES, parseBlockSpec } from "@/lib/ip";
 import type { BlockTreeNode, IpBlock, ListResult } from "@/lib/types";
 
 type BlockForm = {
@@ -92,6 +93,11 @@ function buildTreeData(nodes: BlockTreeNode[]): DataNode[] {
     title: (
       <span className="rm-tree-node">
         <span className="rm-tree-cidr">{node.cidr}</span>
+        {node.kind === "range" ? (
+          <Tag color="purple" style={{ marginInlineEnd: 0, fontSize: 11, lineHeight: "16px" }}>
+            区间
+          </Tag>
+        ) : null}
         <Tag
           color={colorOf(IP_BLOCK_STATUS, node.status)}
           style={{ marginInlineEnd: 0, fontSize: 11, lineHeight: "16px" }}
@@ -99,7 +105,8 @@ function buildTreeData(nodes: BlockTreeNode[]): DataNode[] {
           {labelOf(IP_BLOCK_STATUS, node.status)}
         </Tag>
         <span className="rm-tree-percent">
-          {node.used}/{node.total ?? "?"} · {node.percent ?? 0}%
+          {node.allocated}/{node.total ?? "?"} · {node.percent ?? 0}%
+          <span className="rm-muted">（录入 {node.entered}）</span>
         </span>
       </span>
     ),
@@ -151,6 +158,7 @@ export default function IpBlocksPage() {
   );
 
   const [form] = Form.useForm<{ items: BlockForm[] }>();
+  const watchedItems = Form.useWatch("items", form) as BlockForm[] | undefined;
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [editing, setEditing] = useState<IpBlock | null>(null);
   const [saving, setSaving] = useState(false);
@@ -165,7 +173,7 @@ export default function IpBlocksPage() {
 
   const parentOptions = (options?.ipBlocks ?? []).map((b) => ({
     value: b.id,
-    label: b.cidr,
+    label: b.kind === "range" ? `${b.cidr}（区间）` : b.cidr,
     supplierId: b.supplierId,
   }));
   const vlanOptions = (options?.vlans ?? []).map((v) => ({
@@ -228,11 +236,12 @@ export default function IpBlocksPage() {
       for (let i = 0; i < items.length; i += 1) {
         const cidr = items[i].cidr?.trim();
         if (!cidr) continue;
-        if (seen.has(cidr)) {
-          message.error(`第 ${i + 1} 条 CIDR「${cidr}」在本次提交中重复`);
+        const key = parseBlockSpec(cidr)?.canonical ?? cidr;
+        if (seen.has(key)) {
+          message.error(`第 ${i + 1} 条「${cidr}」与本次提交中的其他段重复`);
           return;
         }
-        seen.add(cidr);
+        seen.add(key);
       }
     }
     setSaving(true);
@@ -271,8 +280,15 @@ export default function IpBlocksPage() {
 
   const remove = async (row: IpBlock) => {
     try {
-      await apiFetch(`/api/ip-blocks/${row.id}`, { method: "DELETE" });
-      message.success("IP 段已删除");
+      const result = await apiFetch<{ deletedAddresses?: number }>(
+        `/api/ip-blocks/${row.id}?deleteAddresses=1`,
+        { method: "DELETE" },
+      );
+      message.success(
+        result.deletedAddresses
+          ? `IP 段已删除，连带删除 ${result.deletedAddresses} 个未使用 IP`
+          : "IP 段已删除",
+      );
       if (selectedId === row.id) setSelectedId(null);
       await refreshAll();
     } catch (e) {
@@ -322,14 +338,38 @@ export default function IpBlocksPage() {
     },
   });
 
+  const cidrRule = (index: number) => ({
+    validator: async (_: unknown, value?: string) => {
+      if (!value?.trim()) return;
+      const spec = parseBlockSpec(value);
+      if (!spec) {
+        throw new Error(
+          "请输入合法 CIDR（如 192.168.1.0/24）或 IPv4 闭区间（如 10.99.1.0-10.99.1.255）",
+        );
+      }
+      if (spec.kind === "range") {
+        if (spec.size === null || spec.size > MAX_RANGE_ADDRESSES) {
+          throw new Error(`IP 区间最多 ${MAX_RANGE_ADDRESSES} 个地址，请拆分为多个段`);
+        }
+        const status = form.getFieldValue(["items", index, "status"]);
+        if (status === "container") {
+          throw new Error("IP 区间不能设为容器状态");
+        }
+      }
+    },
+  });
+
   const columns: ColumnsType<IpBlock> = [
     {
-      title: "CIDR",
+      title: "CIDR / IP 区间",
       dataIndex: "cidr",
       render: (_v, row) => (
-        <a className="rm-mono" onClick={() => setSelectedId(row.id)}>
-          {row.cidr}
-        </a>
+        <Space size={6}>
+          <a className="rm-mono" onClick={() => setSelectedId(row.id)}>
+            {row.cidr}
+          </a>
+          {row.kind === "range" ? <Tag color="purple">区间</Tag> : null}
+        </Space>
       ),
     },
     {
@@ -368,14 +408,17 @@ export default function IpBlocksPage() {
         row.vlan ? `VLAN ${row.vlan.vid} ${row.vlan.name}` : "—",
     },
     {
-      title: "利用率",
-      width: 130,
+      title: "已分配 / 容量",
+      width: 180,
       render: (_v, row) => {
         const node = treeMap.get(row.id);
         return node ? (
           <span>
-            {node.used}/{node.total ?? "?"}
+            {node.allocated}/{node.total ?? "?"}
             <span className="rm-muted">（{node.percent ?? 0}%）</span>
+            <div className="rm-muted" style={{ fontSize: 12 }}>
+              已录入 {node.entered}
+            </div>
           </span>
         ) : (
           "—"
@@ -383,8 +426,8 @@ export default function IpBlocksPage() {
       },
     },
     {
-      title: "IP 数",
-      width: 80,
+      title: "直属 IP",
+      width: 100,
       render: (_v, row) => row._count?.ipAddresses ?? 0,
     },
     {
@@ -398,8 +441,8 @@ export default function IpBlocksPage() {
           </Button>
           {isAdmin ? (
             <Popconfirm
-              title="确认删除该 IP 段？"
-              description="仍有子网段、IP 或未释放分配时无法删除。"
+              title="确认删除该 IP 段/区间？"
+              description="段内未被使用的直属 IP 将一并删除；存在子段、有效分配、业务系统端点或宽带引用时会整体拒绝删除。"
               onConfirm={() => void remove(row)}
             >
               <Button type="link" size="small" danger icon={<DeleteOutlined />}>
@@ -416,7 +459,7 @@ export default function IpBlocksPage() {
     <div>
       <PageHeader
         title="IP 段管理"
-        description="网段层级、容器状态与实时利用率；供应商必填，客户归属通过资源分配产生。"
+        description="支持 CIDR 与 IPv4 闭区间（如 10.99.1.0-10.99.1.255）；区间创建时自动生成全部 IP（每段最多 4096 个）。利用率按已分配/容量计算，同时保留已录入 IP 数。"
       />
 
       <Row gutter={14}>
@@ -424,7 +467,7 @@ export default function IpBlocksPage() {
           <Card
             size="small"
             title="网段树"
-            extra={<Tag>{treeNodes.length} 个网段</Tag>}
+            extra={<Tag>{treeNodes.length} 个网段/区间</Tag>}
             styles={{ body: { padding: 0 } }}
           >
             {treeError ? (
@@ -455,7 +498,12 @@ export default function IpBlocksPage() {
           {selectedId && selected ? (
             <Card
               size="small"
-              title={<span className="rm-mono">{selected.cidr}</span>}
+              title={
+                <Space size={6}>
+                  <span className="rm-mono">{selected.cidr}</span>
+                  {selected.kind === "range" ? <Tag color="purple">区间</Tag> : null}
+                </Space>
+              }
               style={{ marginBottom: 14 }}
               extra={
                 <Space wrap>
@@ -469,9 +517,11 @@ export default function IpBlocksPage() {
                   >
                     新增 IP
                   </Button>
-                  <Button size="small" icon={<ThunderboltOutlined />} onClick={openGenerate}>
-                    批量生成
-                  </Button>
+                  {selected.kind === "range" ? null : (
+                    <Button size="small" icon={<ThunderboltOutlined />} onClick={openGenerate}>
+                      批量生成
+                    </Button>
+                  )}
                   <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(selected)}>
                     编辑
                   </Button>
@@ -495,15 +545,27 @@ export default function IpBlocksPage() {
                 </Descriptions.Item>
                 <Descriptions.Item label="网关">{selected.gateway ?? "—"}</Descriptions.Item>
                 <Descriptions.Item label="分配日期">{selected.assignedAt ?? "—"}</Descriptions.Item>
-                <Descriptions.Item label="直接 IP">{selected._count?.ipAddresses ?? 0}</Descriptions.Item>
+                <Descriptions.Item label="直属 IP">{selected._count?.ipAddresses ?? 0}</Descriptions.Item>
                 <Descriptions.Item label="子网段">{selected._count?.children ?? 0}</Descriptions.Item>
-                <Descriptions.Item label="利用率">
-                  {treeMap.get(selected.id)?.percent ?? 0}%
+                <Descriptions.Item label="已分配 / 容量">
+                  {treeMap.get(selected.id)?.allocated ?? 0}/
+                  {treeMap.get(selected.id)?.total ?? "?"}（{treeMap.get(selected.id)?.percent ?? 0}%）
+                </Descriptions.Item>
+                <Descriptions.Item label="已录入 IP">
+                  {treeMap.get(selected.id)?.entered ?? 0}
                 </Descriptions.Item>
                 <Descriptions.Item label="描述" span={3}>
                   {selected.description ?? "—"}
                 </Descriptions.Item>
               </Descriptions>
+              {selected.kind === "range" ? (
+                <Alert
+                  type="info"
+                  showIcon
+                  style={{ marginTop: 8 }}
+                  message="该 IP 区间创建时已自动生成区间内全部地址（含网络地址、广播地址，最多 4096 个）；扩展区间保存后会自动补齐新地址。"
+                />
+              ) : null}
               {selected.children && selected.children.length > 0 ? (
                 <Space wrap style={{ marginTop: 8 }}>
                   {selected.children.map((child) => (
@@ -519,7 +581,7 @@ export default function IpBlocksPage() {
               type="info"
               showIcon
               style={{ marginBottom: 14 }}
-              message="在左侧选择网段可查看详情、新增子段或批量生成 IP；下方列表显示所选网段的直接子段。"
+              message="在左侧选择网段/区间可查看详情、新增子段或生成 IP；下方列表显示所选网段的直接子段。"
             />
           )}
 
@@ -527,7 +589,7 @@ export default function IpBlocksPage() {
             <div className="rm-toolbar-filters">
               <DebouncedSearchInput
                 value={keyword}
-                placeholder="搜索 CIDR / 描述 / 网关 / 供应商"
+                placeholder="搜索 CIDR / 区间 / 描述 / 网关 / 供应商"
                 style={{ width: 250 }}
                 onSearch={(v) => {
                   setKeyword(v);
@@ -609,7 +671,7 @@ export default function IpBlocksPage() {
             loading={isLoading}
             dataSource={data?.items ?? []}
             columns={columns}
-            scroll={{ x: 1260 }}
+            scroll={{ x: 1360 }}
             pagination={{
               current: page,
               pageSize,
@@ -647,20 +709,34 @@ export default function IpBlocksPage() {
             form={form}
             batch={!editing}
             defaultItem={defaults()}
-            renderItem={(field, index) => (
+            renderItem={(field, index) => {
+              const rowSpec = parseBlockSpec(watchedItems?.[index]?.cidr ?? "");
+              const rowIsRange = rowSpec?.kind === "range";
+              return (
               <>
                 <Space size={12} style={{ display: "flex" }} align="start">
                   <Form.Item
                     name={[field.name, "cidr"]}
-                    label="CIDR"
-                    rules={[{ required: true, message: "请输入 CIDR，如 192.168.1.0/24" }]}
+                    label="CIDR / IP 区间"
+                    rules={[
+                      {
+                        required: true,
+                        message: "请输入 CIDR（如 192.168.1.0/24）或 IPv4 区间（如 10.99.1.0-10.99.1.255）",
+                      },
+                      cidrRule(index),
+                    ]}
+                    extra={
+                      rowIsRange && rowSpec?.size
+                        ? `IPv4 闭区间，共 ${rowSpec.size} 个地址；保存后自动生成区间内全部 IP 地址。`
+                        : "CIDR 仅支持 IPv4/IPv6；任意区间仅支持 IPv4。"
+                    }
                     style={{ flex: 1 }}
                   >
-                    <Input placeholder="192.168.1.0/24" maxLength={100} />
+                    <Input placeholder="192.168.1.0/24 或 10.99.1.0-10.99.1.255" maxLength={100} />
                   </Form.Item>
                   <Form.Item
                     name={[field.name, "parentId"]}
-                    label="父网段（可空，系统按 CIDR 自动推导）"
+                    label="父网段（可空，系统按覆盖范围自动推导）"
                     style={{ flex: 1 }}
                   >
                     <Select
@@ -680,7 +756,12 @@ export default function IpBlocksPage() {
                 </Space>
                 <Space size={12} style={{ display: "flex" }} align="start">
                   <Form.Item name={[field.name, "status"]} label="状态" style={{ flex: 1 }}>
-                    <Select options={IP_BLOCK_STATUS} />
+                    <Select
+                      options={IP_BLOCK_STATUS.map((item) => ({
+                        ...item,
+                        disabled: rowIsRange && item.value === "container",
+                      }))}
+                    />
                   </Form.Item>
                   <Form.Item name={[field.name, "role"]} label="角色" style={{ flex: 1 }}>
                     <Select options={IP_BLOCK_ROLES} />
@@ -720,7 +801,8 @@ export default function IpBlocksPage() {
                   <Input.TextArea rows={2} maxLength={500} />
                 </Form.Item>
               </>
-            )}
+              );
+            }}
           />
         </Form>
       </CrudDrawer>

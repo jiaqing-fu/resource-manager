@@ -209,9 +209,12 @@ model Vxlan {
 }
 
 model IpBlock {
-  id       String    @id @default(cuid())
-  cidr     String    @unique
-  parentId String?
+  id         String  @id @default(cuid())
+  cidr       String  @unique // CIDR 或规范化区间 start-end
+  kind       String  @default("cidr") // cidr / range
+  rangeStart String? // 区间起始 IP（仅 kind=range）
+  rangeEnd   String? // 区间结束 IP（仅 kind=range）
+  parentId   String?
   parent   IpBlock?  @relation("IpBlockTree", fields: [parentId], references: [id], onDelete: Restrict)
   children IpBlock[] @relation("IpBlockTree")
 
@@ -430,13 +433,15 @@ model ResourceAllocation {
   customerId String
   customer   Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
 
-  resourceType  String // rack / ipBlock / ipAddress / vlan / vxlan / broadband / line / device
+  resourceType  String // rack / ipBlock / ipRange / ipAddress / vlan / vxlan / broadband / line / device
   resourceName  String // 分配时快照，资源删除后仍可追溯
   supplierName  String? // 分配时快照
   uStart        Int? // 机柜分配的子区间；其他类型为空
   uEnd          Int?
+  ipRangeStart  String? // IP 区间分配的子区间起始 IP
+  ipRangeEnd    String? // IP 区间分配的子区间结束 IP
   allocatedMbps Int? // 宽带分配 MBPS；其他类型为空
-  activeKey     String? @unique // 六类单分配资源：`${resourceType}:${resourceId}`；rack/broadband 始终为 NULL
+  activeKey     String? @unique // 单分配资源：`${resourceType}:${resourceId}`；rack/broadband/ipRange 始终为 NULL
 
   rackId      String?
   rack        Rack?      @relation(fields: [rackId], references: [id], onDelete: SetNull)
@@ -468,6 +473,7 @@ model ResourceAllocation {
   @@index([rackId])
   @@index([rackId, releasedAt])
   @@index([ipBlockId])
+  @@index([resourceType, ipBlockId, releasedAt])
   @@index([ipAddressId])
   @@index([vlanId])
   @@index([vxlanId])

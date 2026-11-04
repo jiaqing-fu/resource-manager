@@ -13,8 +13,12 @@ import {
 } from "@/lib/api";
 import { IP_BLOCK_ROLES, IP_BLOCK_STATUS } from "@/lib/enums";
 import { ipBlockSchema } from "@/lib/ip-block-schema";
-import { parseCidr, usableCount } from "@/lib/ip";
-import { recomputeBlockParents, validateBlockInput } from "@/server/services/ipam";
+import { parseStoredBlock, usableCount } from "@/lib/ip";
+import {
+  recomputeBlockParents,
+  syncRangeAddresses,
+  validateBlockInput,
+} from "@/server/services/ipam";
 import {
   assertSupplierConsistent,
   resolveSupplierForCreate,
@@ -71,12 +75,18 @@ export async function GET(req: NextRequest) {
       prisma.ipBlock.count({ where }),
     ]);
     const items = rows.map((r) => {
-      const parsed = parseCidr(r.cidr);
+      const parsed = parseStoredBlock(r);
+      const isRange = parsed?.kind === "range";
       return {
         ...r,
         version: parsed?.version ?? 4,
-        prefix: parsed?.prefix ?? null,
-        usable: parsed ? usableCount(parsed.version, parsed.prefix) : null,
+        prefix: isRange ? null : (parsed?.prefix ?? null),
+        usable: isRange
+          ? parsed?.size
+          : parsed?.version === 4 && parsed.prefix !== null
+            ? usableCount(parsed.version, parsed.prefix)
+            : null,
+        rangeSize: isRange ? (parsed?.size ?? null) : null,
       };
     });
     return jsonOk(listResult(items, total, paging));
@@ -118,6 +128,9 @@ export async function POST(req: NextRequest) {
       const block = await tx.ipBlock.create({
         data: {
           cidr: normalized.cidr,
+          kind: normalized.kind,
+          rangeStart: normalized.rangeStart,
+          rangeEnd: normalized.rangeEnd,
           ipVersion: normalized.ipVersion,
           parentId: normalized.parentId,
           status: body.status,
@@ -131,6 +144,7 @@ export async function POST(req: NextRequest) {
         },
       });
       await recomputeBlockParents(tx);
+      const generated = await syncRangeAddresses(tx, block);
       await writeChangeLog(tx, {
         user,
         resource: "ipBlock",
@@ -139,14 +153,15 @@ export async function POST(req: NextRequest) {
         summary: `创建 IP 段 ${block.cidr}`,
         after: block,
       });
-      return tx.ipBlock.findUniqueOrThrow({
+      const result = await tx.ipBlock.findUniqueOrThrow({
         where: { id: block.id },
         include: {
           parent: { select: { id: true, cidr: true } },
           supplier: { select: { id: true, name: true } },
         },
       });
-    });
+      return { ...result, generated };
+    }, { maxWait: 10_000, timeout: 30_000 });
     return jsonOk(created, 201);
   } catch (error) {
     return handleApiError(error);

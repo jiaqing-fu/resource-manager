@@ -63,7 +63,15 @@ export async function GET(req: NextRequest) {
         include: {
           customer: { select: { id: true, name: true } },
           rack: { select: { id: true, code: true, location: true, uStart: true, uEnd: true } },
-          ipBlock: { select: { id: true, cidr: true } },
+          ipBlock: {
+            select: {
+              id: true,
+              cidr: true,
+              kind: true,
+              rangeStart: true,
+              rangeEnd: true,
+            },
+          },
           ipAddress: { select: { id: true, address: true } },
           vlan: { select: { id: true, vid: true, name: true } },
           vxlan: { select: { id: true, vni: true, name: true } },
@@ -101,6 +109,8 @@ export async function POST(req: NextRequest) {
         notes: body.notes,
         uStart: body.uStart,
         uEnd: body.uEnd,
+        ipRangeStart: body.ipRangeStart,
+        ipRangeEnd: body.ipRangeEnd,
         allocatedMbps: body.allocatedMbps,
       });
       await writeChangeLog(tx, {
@@ -118,7 +128,7 @@ export async function POST(req: NextRequest) {
         },
       });
       return created;
-    });
+    }, { maxWait: 10_000, timeout: 30_000 });
     return jsonOk(result.allocation, 201);
   } catch (error) {
     return handleApiError(error);

@@ -133,6 +133,7 @@ export const BROADBAND_STATUS: Option[] = [
 export const ALLOCATION_RESOURCE_TYPES: Option[] = [
   { value: "ipAddress", label: "IP 地址" },
   { value: "ipBlock", label: "IP 段" },
+  { value: "ipRange", label: "IP 区间" },
   { value: "rack", label: "机柜" },
   { value: "device", label: "设备" },
   { value: "vlan", label: "VLAN" },

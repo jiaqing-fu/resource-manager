@@ -159,7 +159,32 @@ async function main() {
     const main = wb.getWorksheet("IP段")!;
     main.addRow(["10.99.0.0/16", "在用", "内部", "", 100, "中国电信", "", "测试父段", ""]);
     main.addRow(["10.99.1.0/24", "在用", "内部", "10.99.0.0/16", 100, "", "10.99.1.1", "测试子段", ""]);
+    main.addRow(["10.40.0.0-10.40.0.15", "在用", "内部", "", "", "中国电信", "", "测试 IP 区间", ""]);
   });
+
+  const rangeBlock = await prisma.ipBlock.findUnique({
+    where: { cidr: "10.40.0.0-10.40.0.15" },
+    include: { _count: { select: { ipAddresses: true } } },
+  });
+  if (
+    rangeBlock?.kind !== "range" ||
+    rangeBlock._count.ipAddresses !== 16 ||
+    !(await prisma.ipAddress.findUnique({ where: { address: "10.40.0.0" } })) ||
+    !(await prisma.ipAddress.findUnique({ where: { address: "10.40.0.15" } }))
+  ) {
+    throw new Error("IP 区间导入未自动生成 16 个地址（含起止地址）");
+  }
+  console.log("PASS IP 区间导入自动生成 16 个地址");
+
+  await importModule("ip-blocks", (wb) => {
+    wb.getWorksheet("IP段")!.addRow([
+      "10.40.0.0-10.40.0.15", "在用", "内部", "", "", "中国电信", "", "再次导入测试幂等", "",
+    ]);
+  });
+  if ((await prisma.ipAddress.count({ where: { blockId: rangeBlock.id } })) !== 16) {
+    throw new Error("重复导入 IP 区间产生了重复地址");
+  }
+  console.log("PASS IP 区间重复导入幂等");
 
   await importModule("devices", (wb) => {
     wb.getWorksheet("设备")!.addRow([
@@ -182,7 +207,14 @@ async function main() {
     const main = wb.getWorksheet("IP地址")!;
     main.addRow(["10.99.1.10", "10.99.1.0/24", "在用", "管理", "", "A01", "核心路由器-01", "", "否", "core-1", "", "2026-11-01"]);
     main.addRow(["10.99.1.11", "10.99.1.0/24", "在用", "客户", "中国电信", "", "", "LN-TEST-001", "否", "srv-1", "", "2026-11-01"]);
+    main.addRow(["10.40.0.10", "10.40.0.0-10.40.0.15", "在用", "管理", "中国电信", "", "", "", "否", "range-10", "", "2026-11-01"]);
   });
+
+  const rangeIp = await prisma.ipAddress.findUnique({ where: { address: "10.40.0.10" } });
+  if (rangeIp?.blockId !== rangeBlock.id || rangeIp.dnsName !== "range-10") {
+    throw new Error("IP 地址导入未能按 IP 区间标签解析所属段");
+  }
+  console.log("PASS IP 地址导入按区间标签匹配所属段");
 
   await importModule("broadbands", (wb) => {
     wb.getWorksheet("宽带")!.addRow([

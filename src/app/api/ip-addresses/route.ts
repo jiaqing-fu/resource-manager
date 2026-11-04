@@ -14,7 +14,7 @@ import {
 } from "@/lib/api";
 import { IP_ADDRESS_ROLES, IP_ADDRESS_STATUS } from "@/lib/enums";
 import { ipAddressSchema } from "@/lib/ip-address-schema";
-import { validateAddressInput } from "@/server/services/ipam";
+import { recomputeIpCustomersForSpan, validateAddressInput } from "@/server/services/ipam";
 import { resolveSupplierForCreate } from "@/server/services/supplier-requirements";
 import { writeChangeLog } from "@/lib/changelog";
 
@@ -66,7 +66,16 @@ export async function GET(req: NextRequest) {
         skip: paging.skip,
         take: paging.pageSize,
         include: {
-          block: { select: { id: true, cidr: true, status: true } },
+          block: {
+            select: {
+              id: true,
+              cidr: true,
+              kind: true,
+              rangeStart: true,
+              rangeEnd: true,
+              status: true,
+            },
+          },
           supplier: { select: { id: true, name: true } },
           customer: { select: { id: true, name: true } },
           rack: { select: { id: true, code: true, location: true, uStart: true, uEnd: true } },
@@ -106,6 +115,7 @@ export async function POST(req: NextRequest) {
       const ip = await tx.ipAddress.create({
         data: data as unknown as Prisma.IpAddressUncheckedCreateInput,
       });
+      await recomputeIpCustomersForSpan(tx, ip.address, ip.address);
       await writeChangeLog(tx, {
         user,
         resource: "ipAddress",
@@ -114,7 +124,7 @@ export async function POST(req: NextRequest) {
         summary: `创建 IP ${ip.address}`,
         after: ip,
       });
-      return ip;
+      return tx.ipAddress.findUniqueOrThrow({ where: { id: ip.id } });
     });
     return jsonOk(created, 201);
   } catch (error) {

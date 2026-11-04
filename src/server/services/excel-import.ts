@@ -3,12 +3,18 @@ import type { SessionUser } from "@/lib/auth";
 import { ApiError } from "@/lib/api";
 import { prisma } from "@/lib/db";
 import { addDays } from "@/lib/dates";
-import { parseCidr, parseIp } from "@/lib/ip";
+import { parseBlockSpec, parseIp } from "@/lib/ip";
 import { writeChangeLog } from "@/lib/changelog";
 import { VXLAN_VNI_MAX, VXLAN_VNI_MIN } from "@/lib/vxlan-schema";
 import type { ParsedRow, ParsedWorkbook, ImportCellError } from "@/lib/excel/parse";
 import type { ModuleSpec, SheetSpec } from "@/lib/excel/specs";
-import { recomputeBlockParents, validateAddressInput, validateBlockInput } from "./ipam";
+import {
+  recomputeBlockParents,
+  recomputeIpCustomersForSpan,
+  syncRangeAddresses,
+  validateAddressInput,
+  validateBlockInput,
+} from "./ipam";
 import {
   validateDevicePlacement,
   validateRackSegment,
@@ -168,7 +174,9 @@ async function loadCache(tx: Tx): Promise<Cache> {
     vxlanByVlanId: new Map(
       vxlans.filter((v) => v.vlanId).map((v) => [v.vlanId as string, v]),
     ),
-    blocks: new Map(blocks.map((b) => [b.cidr, b])),
+    blocks: new Map(
+      blocks.map((b) => [parseBlockSpec(b.cidr)?.canonical ?? b.cidr, b]),
+    ),
     ips: new Map(ips.map((ip) => [ip.address, ip])),
     devicesByName: new Map(),
     devicesBySerial: new Map(),
@@ -427,9 +435,13 @@ function resolveVlan(
 
 function resolveBlock(ctx: Ctx, cidrText: string | null): BlockLite | null {
   if (!cidrText) return null;
-  const parsed = parseCidr(cidrText);
+  const parsed = parseBlockSpec(cidrText);
   if (!parsed) {
-    throw new ApiError(422, `IP 段「${cidrText}」不是合法 CIDR`, "INVALID_CIDR");
+    throw new ApiError(
+      422,
+      `IP 段「${cidrText}」不是合法 CIDR 或 IP 区间`,
+      "INVALID_BLOCK",
+    );
   }
   const block = ctx.cache.blocks.get(parsed.canonical);
   if (!block) {
@@ -920,19 +932,31 @@ async function importVxlans(ctx: Ctx, parsed: ParsedWorkbook): Promise<void> {
 /* ---------------------------------- IP 段 ---------------------------------- */
 
 async function importIpBlocks(ctx: Ctx, parsed: ParsedWorkbook): Promise<void> {
+  // 覆盖范围大的段先处理，保证父段先于子段创建。
   const rows = [...(parsed.sheets.main ?? [])].sort((a, b) => {
-    const pa = parseCidr(text(a, "cidr") ?? "");
-    const pb = parseCidr(text(b, "cidr") ?? "");
-    return (pa?.prefix ?? 999) - (pb?.prefix ?? 999);
+    const pa = parseBlockSpec(text(a, "cidr") ?? "");
+    const pb = parseBlockSpec(text(b, "cidr") ?? "");
+    if (!pa && !pb) return 0;
+    if (!pa) return 1;
+    if (!pb) return -1;
+    if (pa.version !== pb.version) return pa.version - pb.version;
+    if (pa.version === 4) return (pb.size ?? 0) - (pa.size ?? 0);
+    return (pa.prefix ?? 128) - (pb.prefix ?? 128);
   });
 
   for (const row of rows) {
     const cidrText = text(row, "cidr");
     if (!cidrText) continue;
     try {
-      const parsedCidr = parseCidr(cidrText);
-      if (!parsedCidr) {
-        addError(ctx, row, "CIDR", `「${cidrText}」不是合法 CIDR，如 192.168.1.0/24`, cidrText);
+      const parsedBlock = parseBlockSpec(cidrText);
+      if (!parsedBlock) {
+        addError(
+          ctx,
+          row,
+          "CIDR / IP 区间",
+          `「${cidrText}」不是合法 CIDR 或 IPv4 闭区间，如 192.168.1.0/24、10.99.1.0-10.99.1.255`,
+          cidrText,
+        );
         continue;
       }
       const status = text(row, "status") ?? "active";
@@ -947,7 +971,7 @@ async function importIpBlocks(ctx: Ctx, parsed: ParsedWorkbook): Promise<void> {
       const explicitSupplier = supplierName ? resolveSupplier(ctx, supplierName) : null;
       const vlanVid = int(row, "vlanVid");
       const vlan = resolveVlan(ctx, explicitSupplier?.id ?? null, vlanVid);
-      const existing = ctx.cache.blocks.get(parsedCidr.canonical);
+      const existing = ctx.cache.blocks.get(parsedBlock.canonical);
       const supplierId = resolveImportedSupplier(
         ctx,
         supplierName,
@@ -960,7 +984,7 @@ async function importIpBlocks(ctx: Ctx, parsed: ParsedWorkbook): Promise<void> {
       const validated = await validateBlockInput(
         ctx.tx,
         {
-          cidr: parsedCidr.canonical,
+          cidr: parsedBlock.canonical,
           status,
           role,
           parentId: parent?.id ?? null,
@@ -974,6 +998,9 @@ async function importIpBlocks(ctx: Ctx, parsed: ParsedWorkbook): Promise<void> {
       );
       const data = {
         cidr: validated.cidr,
+        kind: validated.kind,
+        rangeStart: validated.rangeStart,
+        rangeEnd: validated.rangeEnd,
         ipVersion: validated.ipVersion,
         parentId: validated.parentId,
         status,
@@ -984,13 +1011,16 @@ async function importIpBlocks(ctx: Ctx, parsed: ParsedWorkbook): Promise<void> {
         description: text(row, "description"),
         assignedAt: text(row, "assignedAt"),
       };
+      let blockId: string;
       if (existing) {
         await ctx.tx.ipBlock.update({ where: { id: existing.id }, data });
         existing.status = status;
         existing.supplierId = supplierId;
+        blockId = existing.id;
         countRow(ctx, "main", "updated");
       } else {
         const created = await ctx.tx.ipBlock.create({ data });
+        blockId = created.id;
         ctx.cache.blocks.set(validated.cidr, {
           id: created.id,
           cidr: validated.cidr,
@@ -998,6 +1028,17 @@ async function importIpBlocks(ctx: Ctx, parsed: ParsedWorkbook): Promise<void> {
           supplierId,
         });
         countRow(ctx, "main", "created");
+      }
+      if (validated.kind === "range") {
+        await syncRangeAddresses(ctx.tx, {
+          id: blockId,
+          cidr: validated.cidr,
+          kind: validated.kind,
+          rangeStart: validated.rangeStart,
+          rangeEnd: validated.rangeEnd,
+          ipVersion: validated.ipVersion,
+          supplierId,
+        });
       }
     } catch (error) {
       recordApiError(ctx, row, "IP段", error);
@@ -1071,6 +1112,7 @@ async function importIpAddresses(ctx: Ctx, parsed: ParsedWorkbook): Promise<void
         });
         countRow(ctx, "main", "created");
       }
+      await recomputeIpCustomersForSpan(ctx.tx, parsedIp.canonical, parsedIp.canonical);
     } catch (error) {
       recordApiError(ctx, row, "IP 地址", error);
     }

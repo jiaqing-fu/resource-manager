@@ -34,7 +34,7 @@ export async function POST(req: NextRequest, { params }: Params) {
         after: generated,
       });
       return generated;
-    });
+    }, { maxWait: 10_000, timeout: 30_000 });
     return jsonOk(result, 201);
   } catch (error) {
     return handleApiError(error);

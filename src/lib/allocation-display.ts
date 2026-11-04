@@ -4,6 +4,8 @@ export type AllocationDisplayRow = {
   resourceName: string;
   uStart: number | null;
   uEnd: number | null;
+  ipRangeStart: string | null;
+  ipRangeEnd: string | null;
   allocatedMbps: number | null;
   rack: { code: string } | null;
   ipBlock: { cidr: string } | null;
@@ -23,6 +25,10 @@ export function allocationDisplayName(row: AllocationDisplayRow): string {
         : row.resourceName;
     case "ipBlock":
       return row.ipBlock?.cidr ?? row.resourceName;
+    case "ipRange":
+      return row.ipBlock
+        ? `${row.ipBlock.cidr} [${row.ipRangeStart ?? "?"}-${row.ipRangeEnd ?? "?"}]`
+        : row.resourceName;
     case "ipAddress":
       return row.ipAddress?.address ?? row.resourceName;
     case "vlan":

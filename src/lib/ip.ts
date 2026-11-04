@@ -15,6 +15,33 @@ export type ParsedCidr = {
   addr: ipaddr.IPv4 | ipaddr.IPv6;
 };
 
+export type ParsedIpRange = {
+  start: string;
+  end: string;
+  version: IpVersion;
+  canonical: string;
+  /** IPv4 闭区间地址数；IPv6 区间不受支持，因此为 null。 */
+  size: number | null;
+  startLong: number | null;
+  endLong: number | null;
+};
+
+export type ParsedBlock = {
+  kind: "cidr" | "range";
+  canonical: string;
+  version: IpVersion;
+  prefix: number | null;
+  startIp: string;
+  endIp: string;
+  startLong: number | null;
+  endLong: number | null;
+  /** IPv4 闭区间地址数；IPv6 为 null。 */
+  size: number | null;
+};
+
+export const MAX_RANGE_ADDRESSES = 4096;
+export const MAX_RANGE_ALLOCATION_ADDRESSES = 4096;
+
 function versionOf(addr: ipaddr.IPv4 | ipaddr.IPv6): IpVersion {
   return addr.kind() === "ipv4" ? 4 : 6;
 }
@@ -23,9 +50,11 @@ function ipv4BytesToLong(bytes: number[]): number {
   return ((bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3]) >>> 0;
 }
 
-function longToIpv4(n: number): string {
+export function ipv4LongToIp(n: number): string {
   return [n >>> 24, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff].join(".");
 }
+
+const longToIpv4 = ipv4LongToIp;
 
 function maskBytes(bytes: number[], prefix: number): number[] {
   const out = bytes.slice();
@@ -175,4 +204,203 @@ export function normalizedCidrAddress(cidr: string): string | null {
   const c = parseCidr(cidr);
   if (!c) return null;
   return c.canonical.split("/")[0];
+}
+
+function compareIpv6Bytes(a: number[], b: number[]): number {
+  for (let i = 0; i < Math.min(a.length, b.length); i++) {
+    if (a[i] !== b[i]) return a[i] - b[i];
+  }
+  return a.length - b.length;
+}
+
+/** 解析闭区间 `start-end`。任意 IPv6 区间可以解析，但业务层不支持。 */
+export function parseIpRange(input: string): ParsedIpRange | null {
+  const s = (input ?? "").trim();
+  if (!s) return null;
+  const parts = s.split("-");
+  if (parts.length !== 2) return null;
+  const start = parseIp(parts[0]);
+  const end = parseIp(parts[1]);
+  if (!start || !end || start.version !== end.version) return null;
+
+  if (start.version === 4) {
+    const startLong = ipv4BytesToLong(start.addr.toByteArray());
+    const endLong = ipv4BytesToLong(end.addr.toByteArray());
+    if (startLong > endLong) return null;
+    return {
+      start: start.canonical,
+      end: end.canonical,
+      version: 4,
+      canonical: `${start.canonical}-${end.canonical}`,
+      size: endLong - startLong + 1,
+      startLong,
+      endLong,
+    };
+  }
+
+  if (compareIpv6Bytes(start.addr.toByteArray(), end.addr.toByteArray()) > 0) {
+    return null;
+  }
+  return {
+    start: start.canonical,
+    end: end.canonical,
+    version: 6,
+    canonical: `${start.canonical}-${end.canonical}`,
+    size: null,
+    startLong: null,
+    endLong: null,
+  };
+}
+
+function cidrEdgeIps(cidr: ParsedCidr): { startIp: string; endIp: string } {
+  const bytes = maskBytes(cidr.addr.toByteArray(), cidr.prefix);
+  const last = bytes.slice();
+  let remaining = cidr.prefix;
+  for (let i = 0; i < last.length; i++) {
+    if (remaining >= 8) {
+      remaining -= 8;
+    } else if (remaining > 0) {
+      last[i] = (last[i] | (0xff >>> remaining)) & 0xff;
+      remaining = 0;
+    } else {
+      last[i] = 0xff;
+    }
+  }
+  if (cidr.version === 4) {
+    return {
+      startIp: ipv4LongToIp(ipv4BytesToLong(bytes)),
+      endIp: ipv4LongToIp(ipv4BytesToLong(last)),
+    };
+  }
+  return { startIp: ipv6BytesToString(bytes), endIp: ipv6BytesToString(last) };
+}
+
+/**
+ * 解析网段定义：CIDR 或 IPv4 闭区间 `start-end`。
+ * IPv6 任意区间不属于业务支持范围，返回 null。
+ */
+export function parseBlockSpec(input: string): ParsedBlock | null {
+  const s = (input ?? "").trim();
+  if (!s) return null;
+  if (s.includes("/")) {
+    const c = parseCidr(s);
+    if (!c) return null;
+    const { startIp, endIp } = cidrEdgeIps(c);
+    if (c.version === 4) {
+      const startLong = ipv4ToLong(startIp);
+      const endLong = ipv4ToLong(endIp);
+      if (startLong === null || endLong === null) return null;
+      return {
+        kind: "cidr",
+        canonical: c.canonical,
+        version: 4,
+        prefix: c.prefix,
+        startIp,
+        endIp,
+        startLong,
+        endLong,
+        size: endLong - startLong + 1,
+      };
+    }
+    return {
+      kind: "cidr",
+      canonical: c.canonical,
+      version: 6,
+      prefix: c.prefix,
+      startIp,
+      endIp,
+      startLong: null,
+      endLong: null,
+      size: null,
+    };
+  }
+  if (!s.includes("-")) return null;
+  const r = parseIpRange(s);
+  if (!r || r.version !== 4) return null;
+  return {
+    kind: "range",
+    canonical: r.canonical,
+    version: 4,
+    prefix: null,
+    startIp: r.start,
+    endIp: r.end,
+    startLong: r.startLong,
+    endLong: r.endLong,
+    size: r.size,
+  };
+}
+
+/** 将已解析的 IPv4 区间转为统一的段定义；IPv6 区间返回 null。 */
+export function rangeToBlock(range: ParsedIpRange): ParsedBlock | null {
+  if (range.version !== 4) return null;
+  return {
+    kind: "range",
+    canonical: range.canonical,
+    version: 4,
+    prefix: null,
+    startIp: range.start,
+    endIp: range.end,
+    startLong: range.startLong,
+    endLong: range.endLong,
+    size: range.size,
+  };
+}
+
+export type StoredBlock = {
+  kind?: string | null;
+  cidr: string;
+  rangeStart?: string | null;
+  rangeEnd?: string | null;
+};
+
+/** 从数据库行还原段定义（兼容历史 CIDR 行）。 */
+export function parseStoredBlock(block: StoredBlock): ParsedBlock | null {
+  if (block.kind === "range" && block.rangeStart && block.rangeEnd) {
+    return parseBlockSpec(`${block.rangeStart}-${block.rangeEnd}`);
+  }
+  return parseBlockSpec(block.cidr);
+}
+
+export function ipInBlock(ip: string, block: ParsedBlock): boolean {
+  const parsed = parseIp(ip);
+  if (!parsed || parsed.version !== block.version) return false;
+  if (parsed.version === 4) {
+    if (block.startLong === null || block.endLong === null) return false;
+    const n = ipv4BytesToLong(parsed.addr.toByteArray());
+    return n >= block.startLong && n <= block.endLong;
+  }
+  return ipInCidr(parsed.canonical, block.canonical);
+}
+
+/** parent 的覆盖范围是否完整包含 child（允许等覆盖，调用方按需拒绝相等）。 */
+export function blockContainsBlock(parent: ParsedBlock, child: ParsedBlock): boolean {
+  if (parent.version !== child.version) return false;
+  if (parent.version === 4) {
+    if (
+      parent.startLong === null ||
+      parent.endLong === null ||
+      child.startLong === null ||
+      child.endLong === null
+    ) {
+      return false;
+    }
+    return parent.startLong <= child.startLong && parent.endLong >= child.endLong;
+  }
+  return cidrContainsCidr(parent.canonical, child.canonical);
+}
+
+export function blockOverlapsBlock(a: ParsedBlock, b: ParsedBlock): boolean {
+  if (a.version !== b.version) return false;
+  if (a.version === 4) {
+    if (
+      a.startLong === null ||
+      a.endLong === null ||
+      b.startLong === null ||
+      b.endLong === null
+    ) {
+      return false;
+    }
+    return a.startLong <= b.endLong && b.startLong <= a.endLong;
+  }
+  return cidrsOverlap(a.canonical, b.canonical);
 }

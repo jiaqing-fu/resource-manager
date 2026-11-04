@@ -3,15 +3,15 @@ import { prisma } from "@/lib/db";
 import { ApiError, handleApiError, jsonOk, readJson, requireAdmin, requireUser } from "@/lib/api";
 import { ipBlockUpdateSchema } from "@/lib/ip-block-schema";
 import {
-  assertBlockDeletable,
+  deleteBlockCascade,
   recomputeBlockParents,
+  syncRangeAddresses,
   validateBlockInput,
 } from "@/server/services/ipam";
 import {
   assertSupplierConsistent,
   resolveSupplierForUpdate,
 } from "@/server/services/supplier-requirements";
-import { assertResourceNotAllocated } from "@/server/services/allocations";
 import { writeChangeLog } from "@/lib/changelog";
 
 export const dynamic = "force-dynamic";
@@ -25,11 +25,16 @@ export async function GET(req: NextRequest, { params }: Params) {
     const block = await prisma.ipBlock.findUnique({
       where: { id },
       include: {
-        parent: { select: { id: true, cidr: true } },
+        parent: {
+          select: { id: true, cidr: true, kind: true, rangeStart: true, rangeEnd: true },
+        },
         children: {
           select: {
             id: true,
             cidr: true,
+            kind: true,
+            rangeStart: true,
+            rangeEnd: true,
             status: true,
             role: true,
             _count: { select: { ipAddresses: true, children: true } },
@@ -96,6 +101,9 @@ export async function PATCH(req: NextRequest, { params }: Params) {
         where: { id },
         data: {
           cidr: normalized.cidr,
+          kind: normalized.kind,
+          rangeStart: normalized.rangeStart,
+          rangeEnd: normalized.rangeEnd,
           ipVersion: normalized.ipVersion,
           status: merged.status,
           role: merged.role,
@@ -107,6 +115,7 @@ export async function PATCH(req: NextRequest, { params }: Params) {
         },
       });
       await recomputeBlockParents(tx);
+      const generated = await syncRangeAddresses(tx, block);
       await writeChangeLog(tx, {
         user,
         resource: "ipBlock",
@@ -116,14 +125,15 @@ export async function PATCH(req: NextRequest, { params }: Params) {
         before: existing,
         after: block,
       });
-      return tx.ipBlock.findUniqueOrThrow({
+      const result = await tx.ipBlock.findUniqueOrThrow({
         where: { id },
         include: {
           parent: { select: { id: true, cidr: true } },
           supplier: { select: { id: true, name: true } },
         },
       });
-    });
+      return { ...result, generated };
+    }, { maxWait: 10_000, timeout: 30_000 });
     return jsonOk(updated);
   } catch (error) {
     return handleApiError(error);
@@ -134,23 +144,24 @@ export async function DELETE(req: NextRequest, { params }: Params) {
   try {
     const user = await requireAdmin(req);
     const { id } = await params;
-    await prisma.$transaction(async (tx) => {
+    const withAddresses = req.nextUrl.searchParams.get("deleteAddresses") === "1";
+    const result = await prisma.$transaction(async (tx) => {
       const existing = await tx.ipBlock.findUnique({ where: { id } });
       if (!existing) throw new ApiError(404, "IP 段不存在", "NOT_FOUND");
-      await assertBlockDeletable(tx, id);
-      await assertResourceNotAllocated(tx, "ipBlock", id, `IP 段 ${existing.cidr}`);
-      await tx.ipBlock.delete({ where: { id } });
-      await recomputeBlockParents(tx);
+      const deleted = await deleteBlockCascade(tx, id, { withAddresses });
       await writeChangeLog(tx, {
         user,
         resource: "ipBlock",
         recordId: id,
         action: "DELETE",
-        summary: `删除 IP 段 ${existing.cidr}`,
+        summary: `删除 IP 段 ${existing.cidr}${
+          deleted.deletedAddresses > 0 ? `（连带 ${deleted.deletedAddresses} 个 IP）` : ""
+        }`,
         before: existing,
       });
-    });
-    return jsonOk({ ok: true });
+      return deleted;
+    }, { maxWait: 10_000, timeout: 30_000 });
+    return jsonOk({ ok: true, deletedAddresses: result.deletedAddresses });
   } catch (error) {
     return handleApiError(error);
   }

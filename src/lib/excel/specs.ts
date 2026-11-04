@@ -236,12 +236,16 @@ const ipBlockSheet: SheetSpec = {
   key: "main",
   name: "IP段",
   description:
-    "CIDR 必须为网络地址，如 192.168.1.0/24。父网段由系统按包含关系自动建立；导入时按前缀长度从短到长处理。",
+    "支持 CIDR（如 192.168.1.0/24，必须为网络地址）或 IPv4 闭区间（如 10.99.1.0-10.99.1.255，最多 4096 个地址）。区间创建后自动生成全部 IP；父网段由系统按覆盖范围自动建立。",
   columns: [
-    text("cidr", "CIDR", { required: true, width: 22, example: "192.168.1.0/24" }),
+    text("cidr", "CIDR / IP 区间", {
+      required: true,
+      width: 26,
+      example: "10.99.1.0-10.99.1.255",
+    }),
     en("status", "状态", IP_BLOCK_STATUS, { required: true, width: 18, example: "在用" }),
     en("role", "角色", IP_BLOCK_ROLES, { width: 16 }),
-    text("parentCidr", "父网段 CIDR（可空）", { width: 22 }),
+    text("parentCidr", "父网段（CIDR / IP 区间，可空）", { width: 26 }),
     int("vlanVid", "VLAN ID（可空）", { width: 14 }),
     ref("supplierName", "供应商（可继承父段/VLAN）", "supplier", { width: 26 }),
     text("gateway", "网关", { width: 18 }),
@@ -257,7 +261,7 @@ const ipAddressSheet: SheetSpec = {
     "IP 地址全局唯一。供应商可留空，依次从网段、设备、机柜、线路继承；主管理 IP 需绑定设备。",
   columns: [
     text("address", "IP 地址", { required: true, width: 20, example: "192.168.1.10" }),
-    ref("blockCidr", "所在网段 CIDR", "ipBlock", { width: 22 }),
+    ref("blockCidr", "所在网段（CIDR / IP 区间）", "ipBlock", { width: 26 }),
     en("status", "状态", IP_ADDRESS_STATUS, { required: true, width: 12 }),
     en("role", "角色", IP_ADDRESS_ROLES, { width: 14 }),
     ref("supplierName", "供应商（可继承）", "supplier", { width: 24 }),
@@ -467,10 +471,11 @@ export const MODULES: Record<string, ModuleSpec> = {
   "ip-blocks": {
     key: "ip-blocks",
     label: "IP 段",
-    version: "2.0",
+    version: "2.1",
     sheets: [ipBlockSheet],
     refs: ["vlan", "supplier"],
-    importHint: "先导入 VLAN、供应商；IP 段按前缀长度自动排序建立父子关系，供应商可继承父段/VLAN。",
+    importHint:
+      "先导入 VLAN、供应商；支持 CIDR 与 IPv4 闭区间（每段最多 4096 个地址），区间会自动生成全部 IP；按覆盖范围从大到小排序建立父子关系，供应商可继承父段/VLAN。",
   },
   devices: {
     key: "devices",
@@ -492,10 +497,11 @@ export const MODULES: Record<string, ModuleSpec> = {
   "ip-addresses": {
     key: "ip-addresses",
     label: "IP 地址",
-    version: "2.0",
+    version: "2.1",
     sheets: [ipAddressSheet],
     refs: ["ipBlock", "supplier", "rack", "device", "line"],
-    importHint: "导入前先建立 IP 段、机柜、设备、线路；供应商可依次从网段/设备/机柜/线路继承。",
+    importHint:
+      "导入前先建立 IP 段（CIDR 或 IP 区间）、机柜、设备、线路；供应商可依次从网段/设备/机柜/线路继承。",
   },
   broadbands: {
     key: "broadbands",

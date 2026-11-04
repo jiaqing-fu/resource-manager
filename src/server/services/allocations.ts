@@ -1,13 +1,24 @@
 import type { Prisma } from "@prisma/client";
 import { ApiError } from "@/lib/api";
+import {
+  blockContainsBlock,
+  ipv4LongToIp,
+  ipv4ToLong,
+  MAX_RANGE_ALLOCATION_ADDRESSES,
+  parseIpRange,
+  parseStoredBlock,
+  rangeToBlock,
+} from "@/lib/ip";
 import { rackRangeText } from "@/lib/rack";
 import { rangeWithin, rangesOverlap, subtractRanges } from "@/lib/ranges";
+import { ensureAddressesInSpan, recomputeIpCustomersForSpan } from "./ipam";
 
 type Tx = Prisma.TransactionClient;
 
 export const ALLOCATION_RESOURCE_TYPES = [
   "ipAddress",
   "ipBlock",
+  "ipRange",
   "rack",
   "device",
   "vlan",
@@ -26,6 +37,14 @@ export type AllocationOccupiedRange = {
   uEnd: number;
 };
 
+export type AllocationOccupiedIpRange = {
+  allocationId: string;
+  customerId: string;
+  customerName: string;
+  startIp: string;
+  endIp: string;
+};
+
 export type AllocationResourceOption = {
   id: string;
   name: string;
@@ -41,6 +60,13 @@ export type AllocationResourceOption = {
   reusePercent?: number | null;
   occupiedRanges?: AllocationOccupiedRange[];
   freeRanges?: Array<{ start: number; end: number }>;
+  blockId?: string;
+  blockName?: string;
+  kind?: string;
+  rangeStart?: string | null;
+  rangeEnd?: string | null;
+  occupiedIpRanges?: AllocationOccupiedIpRange[];
+  freeIpRanges?: Array<{ startIp: string; endIp: string }>;
 };
 
 type ResourceRecord = AllocationResourceOption & {
@@ -51,6 +77,7 @@ type ResourceRecord = AllocationResourceOption & {
 const FIELD_BY_TYPE: Record<AllocationResourceType, string> = {
   rack: "rackId",
   ipBlock: "ipBlockId",
+  ipRange: "ipBlockId",
   ipAddress: "ipAddressId",
   vlan: "vlanId",
   vxlan: "vxlanId",
@@ -113,6 +140,9 @@ export async function getResourceForAllocation(
         select: {
           id: true,
           cidr: true,
+          kind: true,
+          rangeStart: true,
+          rangeEnd: true,
           status: true,
           supplierId: true,
           customerId: true,
@@ -124,6 +154,43 @@ export async function getResourceForAllocation(
       return {
         id: row.id,
         name: row.cidr,
+        blockId: row.id,
+        blockName: row.cidr,
+        kind: row.kind,
+        rangeStart: row.rangeStart,
+        rangeEnd: row.rangeEnd,
+        supplierId: row.supplierId,
+        supplierName: row.supplier?.name ?? null,
+        customerId: row.customerId,
+        customerName: row.customer?.name ?? null,
+        status: row.status,
+      };
+    }
+    case "ipRange": {
+      const row = await tx.ipBlock.findUnique({
+        where: { id: resourceId },
+        select: {
+          id: true,
+          cidr: true,
+          kind: true,
+          rangeStart: true,
+          rangeEnd: true,
+          status: true,
+          supplierId: true,
+          customerId: true,
+          supplier: { select: { name: true } },
+          customer: { select: { name: true } },
+        },
+      });
+      if (!row) break;
+      return {
+        id: row.id,
+        name: row.cidr,
+        blockId: row.id,
+        blockName: row.cidr,
+        kind: row.kind,
+        rangeStart: row.rangeStart,
+        rangeEnd: row.rangeEnd,
         supplierId: row.supplierId,
         supplierName: row.supplier?.name ?? null,
         customerId: row.customerId,
@@ -369,7 +436,7 @@ export async function listAvailableResources(
     case "ipBlock": {
       const rows = await tx.ipBlock.findMany({
         where: {
-          ...free,
+          allocations: { none: { releasedAt: null, resourceType: "ipBlock" } },
           ...(kw
             ? {
                 OR: [
@@ -384,6 +451,9 @@ export async function listAvailableResources(
         select: {
           id: true,
           cidr: true,
+          kind: true,
+          rangeStart: true,
+          rangeEnd: true,
           status: true,
           supplierId: true,
           customerId: true,
@@ -393,16 +463,167 @@ export async function listAvailableResources(
       return rows.map((r) => ({
         id: r.id,
         name: r.cidr,
+        blockId: r.id,
+        blockName: r.cidr,
+        kind: r.kind,
+        rangeStart: r.rangeStart,
+        rangeEnd: r.rangeEnd,
         supplierId: r.supplierId,
         supplierName: r.supplier?.name ?? null,
         customerId: r.customerId,
         status: r.status,
       }));
     }
+    case "ipRange": {
+      const rows = await tx.ipBlock.findMany({
+        where: {
+          status: { not: "container" },
+          children: { none: {} },
+          ...(kw
+            ? {
+                OR: [
+                  { cidr: { contains: kw } },
+                  { supplier: { is: { name: { contains: kw } } } },
+                ],
+              }
+            : {}),
+        },
+        orderBy: { cidr: "asc" },
+        take: limit,
+        select: {
+          id: true,
+          cidr: true,
+          kind: true,
+          rangeStart: true,
+          rangeEnd: true,
+          status: true,
+          supplierId: true,
+          customerId: true,
+          supplier: { select: { name: true } },
+        },
+      });
+      const [rangeAllocations, individualAllocations] = await Promise.all([
+        tx.resourceAllocation.findMany({
+          where: { resourceType: "ipRange", releasedAt: null },
+          select: {
+            id: true,
+            customerId: true,
+            customer: { select: { name: true } },
+            ipRangeStart: true,
+            ipRangeEnd: true,
+          },
+        }),
+        tx.resourceAllocation.findMany({
+          where: {
+            resourceType: "ipAddress",
+            releasedAt: null,
+            ipAddressId: { not: null },
+          },
+          select: {
+            id: true,
+            customerId: true,
+            customer: { select: { name: true } },
+            ipAddress: { select: { address: true } },
+          },
+        }),
+      ]);
+      const occupiedRanges = rangeAllocations.flatMap((row) => {
+        if (!row.ipRangeStart || !row.ipRangeEnd) return [];
+        const range = parseIpRange(`${row.ipRangeStart}-${row.ipRangeEnd}`);
+        if (
+          !range ||
+          range.version !== 4 ||
+          range.startLong === null ||
+          range.endLong === null
+        ) {
+          return [];
+        }
+        return [
+          {
+            allocationId: row.id,
+            customerId: row.customerId,
+            customerName: row.customer?.name ?? "",
+            start: range.startLong,
+            end: range.endLong,
+          },
+        ];
+      });
+      const individualRanges = individualAllocations.flatMap((row) => {
+        if (!row.ipAddress?.address) return [];
+        const n = ipv4ToLong(row.ipAddress.address);
+        if (n === null) return [];
+        return [
+          {
+            allocationId: row.id,
+            customerId: row.customerId,
+            customerName: row.customer?.name ?? "",
+            start: n,
+            end: n,
+          },
+        ];
+      });
+
+      return rows.flatMap((r) => {
+        const spec = parseStoredBlock(r);
+        if (
+          !spec ||
+          spec.version !== 4 ||
+          spec.startLong === null ||
+          spec.endLong === null
+        ) {
+          return [];
+        }
+        const occupied: AllocationOccupiedIpRange[] = [];
+        for (const range of [...occupiedRanges, ...individualRanges]) {
+          if (!rangesOverlap(range.start, range.end, spec.startLong, spec.endLong)) continue;
+          const start = Math.max(range.start, spec.startLong);
+          const end = Math.min(range.end, spec.endLong);
+          occupied.push({
+            allocationId: range.allocationId,
+            customerId: range.customerId,
+            customerName: range.customerName,
+            startIp: ipv4LongToIp(start),
+            endIp: ipv4LongToIp(end),
+          });
+        }
+        occupied.sort(
+          (a, b) => (ipv4ToLong(a.startIp) ?? 0) - (ipv4ToLong(b.startIp) ?? 0),
+        );
+        const free = subtractRanges(
+          { start: spec.startLong, end: spec.endLong },
+          occupied.map((range) => {
+            const start = ipv4ToLong(range.startIp);
+            const end = ipv4ToLong(range.endIp);
+            return { start: start ?? 0, end: end ?? 0 };
+          }),
+        ).map((range) => ({
+          startIp: ipv4LongToIp(range.start),
+          endIp: ipv4LongToIp(range.end),
+        }));
+        return [
+          {
+            id: r.id,
+            name: r.cidr,
+            blockId: r.id,
+            blockName: r.cidr,
+            kind: r.kind,
+            rangeStart: spec.startIp,
+            rangeEnd: spec.endIp,
+            supplierId: r.supplierId,
+            supplierName: r.supplier?.name ?? null,
+            customerId: r.customerId,
+            status: r.status,
+            occupiedIpRanges: occupied,
+            freeIpRanges: free,
+          },
+        ];
+      });
+    }
     case "ipAddress": {
       const rows = await tx.ipAddress.findMany({
         where: {
           ...free,
+          customerId: null,
           ...(kw
             ? {
                 OR: [
@@ -656,11 +877,13 @@ export async function syncResourceCustomer(
   resourceType: AllocationResourceType,
   resourceId: string,
 ): Promise<void> {
+  if (resourceType === "ipRange") return;
   const field = FIELD_BY_TYPE[resourceType];
   const rows = await tx.resourceAllocation.findMany({
     where: {
       [field]: resourceId,
       releasedAt: null,
+      ...(resourceType === "ipBlock" ? { resourceType: "ipBlock" } : {}),
     } as Prisma.ResourceAllocationWhereInput,
     select: { customerId: true },
     distinct: ["customerId"],
@@ -703,6 +926,9 @@ export type CreateAllocationInput = {
   /** 机柜分配的子区间（闭区间）。 */
   uStart?: number | null;
   uEnd?: number | null;
+  /** IP 区间分配的子区间（闭区间，IPv4）。 */
+  ipRangeStart?: string | null;
+  ipRangeEnd?: string | null;
   /** 宽带分配给客户的 MBPS，允许超过宽带总带宽。 */
   allocatedMbps?: number | null;
 };
@@ -757,6 +983,42 @@ export async function assertRackAllocationsDisjoint(
   }
 }
 
+/** 所有有效 IP 区间分配必须两两互斥（跨父子段同样检查）。 */
+export async function assertIpRangeAllocationsDisjoint(
+  tx: Tx,
+  excludeIds: string[] = [],
+): Promise<void> {
+  const rows = await tx.resourceAllocation.findMany({
+    where: {
+      resourceType: "ipRange",
+      releasedAt: null,
+      ipRangeStart: { not: null },
+      ipRangeEnd: { not: null },
+      ...(excludeIds.length > 0 ? { id: { notIn: excludeIds } } : {}),
+    },
+    orderBy: [{ ipRangeStart: "asc" }, { ipRangeEnd: "asc" }],
+    select: { ipRangeStart: true, ipRangeEnd: true },
+  });
+  const parsed = rows
+    .map((row) => parseIpRange(`${row.ipRangeStart}-${row.ipRangeEnd}`))
+    .filter(
+      (range): range is NonNullable<typeof range> =>
+        Boolean(range && range.startLong !== null && range.endLong !== null),
+    )
+    .sort((a, b) => a.startLong! - b.startLong! || a.endLong! - b.endLong!);
+  for (let i = 1; i < parsed.length; i += 1) {
+    const previous = parsed[i - 1];
+    const current = parsed[i];
+    if (rangesOverlap(previous.startLong!, previous.endLong!, current.startLong!, current.endLong!)) {
+      throw new ApiError(
+        409,
+        `IP 区间分配发生重叠：${previous.canonical} 与 ${current.canonical}`,
+        "IP_RANGE_OVERLAP",
+      );
+    }
+  }
+}
+
 export async function createAllocation(tx: Tx, input: CreateAllocationInput) {
   const customer = await tx.customer.findUnique({
     where: { id: input.customerId },
@@ -770,6 +1032,8 @@ export async function createAllocation(tx: Tx, input: CreateAllocationInput) {
   let activeKey: string | null = activeKeyOf(input.resourceType, input.resourceId);
   let uStart: number | null = null;
   let uEnd: number | null = null;
+  let ipRangeStart: string | null = null;
+  let ipRangeEnd: string | null = null;
   let allocatedMbps: number | null = null;
   let resourceName = resource.name;
 
@@ -822,6 +1086,132 @@ export async function createAllocation(tx: Tx, input: CreateAllocationInput) {
     uStart = input.uStart;
     uEnd = input.uEnd;
     resourceName = `${resource.code ?? resource.name} ${rackRangeText(input.uStart, input.uEnd)}`;
+  } else if (input.resourceType === "ipRange") {
+    if (!input.ipRangeStart || !input.ipRangeEnd) {
+      throw new ApiError(
+        422,
+        "IP 区间分配必须填写起始 IP 和结束 IP",
+        "IP_RANGE_REQUIRED",
+      );
+    }
+    const range = parseIpRange(`${input.ipRangeStart}-${input.ipRangeEnd}`);
+    if (
+      !range ||
+      range.version !== 4 ||
+      range.startLong === null ||
+      range.endLong === null
+    ) {
+      throw new ApiError(
+        422,
+        "IP 区间格式不正确，起止地址必须为 IPv4 且起始不大于结束",
+        "INVALID_IP_RANGE",
+      );
+    }
+    if (range.size === null || range.size > MAX_RANGE_ALLOCATION_ADDRESSES) {
+      throw new ApiError(
+        422,
+        `单次 IP 区间分配最多 ${MAX_RANGE_ALLOCATION_ADDRESSES} 个地址`,
+        "IP_RANGE_TOO_LARGE",
+      );
+    }
+    if (resource.status === "container") {
+      throw new ApiError(
+        422,
+        "容器网段不能分配 IP 区间，请选择具体子网段",
+        "CONTAINER_BLOCK",
+      );
+    }
+    const blockSpec = parseStoredBlock({
+      cidr: resource.name,
+      kind: resource.kind,
+      rangeStart: resource.rangeStart,
+      rangeEnd: resource.rangeEnd,
+    });
+    const rangeSpec = rangeToBlock(range);
+    if (
+      !blockSpec ||
+      !rangeSpec ||
+      !blockContainsBlock(blockSpec, rangeSpec)
+    ) {
+      throw new ApiError(
+        422,
+        `分配区间 ${range.canonical} 必须位于 IP 段 ${resource.name} 内`,
+        "IP_RANGE_OUTSIDE_BLOCK",
+      );
+    }
+    const childCount = await tx.ipBlock.count({
+      where: { parentId: input.resourceId },
+    });
+    if (childCount > 0) {
+      throw new ApiError(
+        422,
+        `IP 段 ${resource.name} 下已有 ${childCount} 个子段，请从叶子段分配区间`,
+        "BLOCK_HAS_CHILDREN",
+      );
+    }
+
+    const activeRanges = await tx.resourceAllocation.findMany({
+      where: { resourceType: "ipRange", releasedAt: null },
+      select: {
+        ipRangeStart: true,
+        ipRangeEnd: true,
+        customer: { select: { name: true } },
+      },
+    });
+    for (const other of activeRanges) {
+      if (!other.ipRangeStart || !other.ipRangeEnd) continue;
+      const otherRange = parseIpRange(`${other.ipRangeStart}-${other.ipRangeEnd}`);
+      if (
+        !otherRange ||
+        otherRange.startLong === null ||
+        otherRange.endLong === null
+      ) {
+        continue;
+      }
+      if (
+        rangesOverlap(
+          range.startLong,
+          range.endLong,
+          otherRange.startLong,
+          otherRange.endLong,
+        )
+      ) {
+        throw new ApiError(
+          409,
+          `分配区间 ${range.canonical} 与已有区间分配 ${otherRange.canonical}（客户 ${other.customer.name}）重叠`,
+          "IP_RANGE_OVERLAP",
+        );
+      }
+    }
+
+    const activeIpAllocations = await tx.resourceAllocation.findMany({
+      where: {
+        resourceType: "ipAddress",
+        releasedAt: null,
+        ipAddressId: { not: null },
+      },
+      select: {
+        customer: { select: { name: true } },
+        ipAddress: { select: { address: true } },
+      },
+    });
+    const allocatedIp = activeIpAllocations.find((other) => {
+      if (!other.ipAddress?.address) return false;
+      const n = ipv4ToLong(other.ipAddress.address);
+      return n !== null && n >= range.startLong! && n <= range.endLong!;
+    });
+    if (allocatedIp?.ipAddress?.address) {
+      throw new ApiError(
+        409,
+        `区间内 IP ${allocatedIp.ipAddress.address} 已有有效单 IP 分配（客户 ${allocatedIp.customer.name}），请先释放`,
+        "IP_RANGE_HAS_ALLOCATED_ADDRESS",
+      );
+    }
+
+    activeKey = null;
+    ipRangeStart = range.start;
+    ipRangeEnd = range.end;
+    resourceName = `${resource.name} [${range.start}-${range.end}]`;
   } else if (input.resourceType === "broadband") {
     if (
       input.allocatedMbps === null ||
@@ -838,11 +1228,43 @@ export async function createAllocation(tx: Tx, input: CreateAllocationInput) {
     activeKey = null;
     allocatedMbps = input.allocatedMbps;
   } else {
+    if (input.resourceType === "ipAddress") {
+      const n = ipv4ToLong(resource.name);
+      if (n !== null) {
+        const activeRanges = await tx.resourceAllocation.findMany({
+          where: { resourceType: "ipRange", releasedAt: null },
+          select: {
+            ipRangeStart: true,
+            ipRangeEnd: true,
+            customer: { select: { name: true } },
+          },
+        });
+        for (const other of activeRanges) {
+          if (!other.ipRangeStart || !other.ipRangeEnd) continue;
+          const range = parseIpRange(`${other.ipRangeStart}-${other.ipRangeEnd}`);
+          if (
+            range &&
+            range.startLong !== null &&
+            range.endLong !== null &&
+            n >= range.startLong &&
+            n <= range.endLong
+          ) {
+            throw new ApiError(
+              409,
+              `IP ${resource.name} 已被区间分配 ${range.canonical}（客户 ${other.customer.name}）占用，请先释放`,
+              "IP_IN_ALLOCATED_RANGE",
+            );
+          }
+        }
+      }
+    }
+
     const field = FIELD_BY_TYPE[input.resourceType];
     const active = await tx.resourceAllocation.findFirst({
       where: {
         [field]: input.resourceId,
         releasedAt: null,
+        ...(input.resourceType === "ipBlock" ? { resourceType: "ipBlock" } : {}),
       } as Prisma.ResourceAllocationWhereInput,
       select: { id: true },
     });
@@ -864,6 +1286,8 @@ export async function createAllocation(tx: Tx, input: CreateAllocationInput) {
     activeKey,
     uStart,
     uEnd,
+    ipRangeStart,
+    ipRangeEnd,
     allocatedMbps,
     [field]: input.resourceId,
     allocatedAt,
@@ -871,7 +1295,30 @@ export async function createAllocation(tx: Tx, input: CreateAllocationInput) {
   } as Prisma.ResourceAllocationUncheckedCreateInput;
 
   const allocation = await tx.resourceAllocation.create({ data });
-  await syncResourceCustomer(tx, input.resourceType, input.resourceId);
+  if (input.resourceType === "ipRange") {
+    const range = parseIpRange(`${ipRangeStart}-${ipRangeEnd}`);
+    if (!range || range.version !== 4) {
+      throw new ApiError(422, "IP 区间格式不正确", "INVALID_IP_RANGE");
+    }
+    await ensureAddressesInSpan(
+      tx,
+      {
+        id: input.resourceId,
+        cidr: resource.name,
+        kind: resource.kind ?? "cidr",
+        rangeStart: resource.rangeStart ?? null,
+        rangeEnd: resource.rangeEnd ?? null,
+        ipVersion: 4,
+        supplierId: resource.supplierId,
+      },
+      range.start,
+      range.end,
+    );
+    await recomputeIpCustomersForSpan(tx, range.start, range.end);
+    await assertIpRangeAllocationsDisjoint(tx);
+  } else {
+    await syncResourceCustomer(tx, input.resourceType, input.resourceId);
+  }
   if (input.resourceType === "rack") {
     await assertRackAllocationsDisjoint(tx, input.resourceId);
   }
@@ -910,17 +1357,27 @@ export async function releaseAllocation(
 
   const resourceType = allocation.resourceType;
   if (isAllocationResourceType(resourceType)) {
-    const resourceId =
-      allocation.rackId ??
-      allocation.ipBlockId ??
-      allocation.ipAddressId ??
-      allocation.vlanId ??
-      allocation.vxlanId ??
-      allocation.broadbandId ??
-      allocation.lineId ??
-      allocation.deviceId;
-    if (resourceId) {
-      await syncResourceCustomer(tx, resourceType, resourceId);
+    if (resourceType === "ipRange") {
+      if (allocation.ipRangeStart && allocation.ipRangeEnd) {
+        await recomputeIpCustomersForSpan(
+          tx,
+          allocation.ipRangeStart,
+          allocation.ipRangeEnd,
+        );
+      }
+    } else {
+      const resourceId =
+        allocation.rackId ??
+        allocation.ipBlockId ??
+        allocation.ipAddressId ??
+        allocation.vlanId ??
+        allocation.vxlanId ??
+        allocation.broadbandId ??
+        allocation.lineId ??
+        allocation.deviceId;
+      if (resourceId) {
+        await syncResourceCustomer(tx, resourceType, resourceId);
+      }
     }
   }
 

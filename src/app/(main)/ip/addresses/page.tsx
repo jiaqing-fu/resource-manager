@@ -89,7 +89,7 @@ function IpAddressFields({ index }: { index: number }) {
 
   const blockOptions = (options?.ipBlocks ?? []).map((b) => ({
     value: b.id,
-    label: b.cidr,
+    label: b.kind === "range" ? `${b.cidr}（区间）` : b.cidr,
     supplierId: b.supplierId,
   }));
   const deviceOptions = (options?.devices ?? []).map((d) => ({
@@ -477,8 +477,13 @@ export default function IpAddressesPage() {
     },
     {
       title: "所属网段",
-      width: 150,
-      render: (_v, row) => <span className="rm-mono">{row.block?.cidr ?? "—"}</span>,
+      width: 200,
+      render: (_v, row) => (
+        <Space size={4}>
+          <span className="rm-mono">{row.block?.cidr ?? "—"}</span>
+          {row.block?.kind === "range" ? <Tag color="purple">区间</Tag> : null}
+        </Space>
+      ),
     },
     {
       title: "供应商",
@@ -529,7 +534,7 @@ export default function IpAddressesPage() {
           {isAdmin ? (
             <Popconfirm
               title="确认删除该 IP？"
-              description="被业务系统端点引用或存在未释放分配时无法删除。"
+              description="被业务系统端点引用、存在未释放分配或处于有效 IP 区间分配内时无法删除。"
               onConfirm={() => void remove(row)}
             >
               <Button type="link" size="small" danger icon={<DeleteOutlined />}>
@@ -544,14 +549,14 @@ export default function IpAddressesPage() {
 
   const blockOptions = (options?.ipBlocks ?? []).map((b) => ({
     value: b.id,
-    label: b.cidr,
+    label: b.kind === "range" ? `${b.cidr}（区间）` : b.cidr,
   }));
 
   return (
     <div>
       <PageHeader
         title="IP 地址管理"
-        description="单个 IP 的状态、角色与指派关系；设备主管理 IP 每台设备仅一个，客户归属通过资源分配产生。"
+        description="单个 IP 的状态、角色与指派关系；设备主管理 IP 每台设备仅一个，客户归属通过资源分配产生。IP 区间创建时自动生成的地址也在此统一管理。"
         extra={
           <Space wrap>
             <ImportExport
@@ -726,7 +731,12 @@ export default function IpAddressesPage() {
               <Descriptions.Item label="角色">
                 {labelOf(IP_ADDRESS_ROLES, detail.role)}
               </Descriptions.Item>
-              <Descriptions.Item label="所属网段">{detail.block?.cidr ?? "—"}</Descriptions.Item>
+              <Descriptions.Item label="所属网段">
+                <Space size={4}>
+                  <span className="rm-mono">{detail.block?.cidr ?? "—"}</span>
+                  {detail.block?.kind === "range" ? <Tag color="purple">区间</Tag> : null}
+                </Space>
+              </Descriptions.Item>
               <Descriptions.Item label="设备主 IP">{detail.isPrimary ? "是" : "否"}</Descriptions.Item>
               <Descriptions.Item label="供应商">{detail.supplier?.name ?? "—"}</Descriptions.Item>
               <Descriptions.Item label="客户">{detail.customer?.name ?? "—"}</Descriptions.Item>

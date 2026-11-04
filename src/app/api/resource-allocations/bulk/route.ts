@@ -62,7 +62,7 @@ export async function POST(req: NextRequest) {
         });
       }
       return saved;
-    });
+    }, { maxWait: 10_000, timeout: 30_000 });
     return jsonOk({
       created: result.created,
       released: result.released,

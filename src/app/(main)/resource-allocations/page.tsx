@@ -39,6 +39,9 @@ function allocationContent(row: AllocationRow): string {
   if (row.resourceType === "rack" && row.uStart !== null && row.uEnd !== null) {
     return `[${row.uStart}-${row.uEnd}]U`;
   }
+  if (row.resourceType === "ipRange" && row.ipRangeStart && row.ipRangeEnd) {
+    return `${row.ipRangeStart}-${row.ipRangeEnd}`;
+  }
   if (row.resourceType === "broadband" && row.allocatedMbps !== null) {
     return `${row.allocatedMbps} Mbps`;
   }
@@ -178,7 +181,7 @@ export default function ResourceAllocationsPage() {
     <div>
       <PageHeader
         title="资源分配"
-        description="多客户批量增减 8 类资源；机柜按子区间分配且分配互斥，宽带可超分，释放后历史永久保留。"
+        description="多客户批量增减 9 类资源；机柜按子区间分配且分配互斥，IP 区间按子区间分配并与单 IP 互斥，宽带可超分，释放后历史永久保留。"
         extra={
           <Space wrap>
             <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>

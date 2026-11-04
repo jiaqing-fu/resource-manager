@@ -11,6 +11,7 @@ import {
   validateDevicePlacement,
   validateRackSegment,
 } from "../src/server/services/inventory";
+import { syncRangeAddresses, validateBlockInput } from "../src/server/services/ipam";
 
 const databaseUrl = process.env.DATABASE_URL ?? "";
 if (!databaseUrl.includes("business-test.db")) {
@@ -296,6 +297,12 @@ async function main() {
             { resourceType: "ipAddress", resourceId: batchResources.ipA.id },
             { resourceType: "ipBlock", resourceId: batchResources.blockA.id },
             {
+              resourceType: "ipRange",
+              resourceId: batchResources.blockA.id,
+              ipRangeStart: "10.20.0.0",
+              ipRangeEnd: "10.20.0.3",
+            },
+            {
               resourceType: "rack",
               resourceId: batchResources.rackA.id,
               uStart: 1,
@@ -319,6 +326,12 @@ async function main() {
             { resourceType: "ipAddress", resourceId: batchResources.ipB.id },
             { resourceType: "ipBlock", resourceId: batchResources.blockB.id },
             {
+              resourceType: "ipRange",
+              resourceId: batchResources.blockB.id,
+              ipRangeStart: "10.21.0.0",
+              ipRangeEnd: "10.21.0.3",
+            },
+            {
               resourceType: "rack",
               resourceId: batchResources.rackB.id,
               uStart: 1,
@@ -338,20 +351,31 @@ async function main() {
       ],
     }),
   );
-  assert(batchResult.created === 16, "批量应新增 16 条");
+  assert(batchResult.created === 18, "批量应新增 18 条");
   assert(batchResult.released === 0, "批量不应释放");
   const createdKeys = await prisma.resourceAllocation.findMany({
     where: { id: { in: batchResult.creates.map((row) => row.id) } },
-    select: { resourceType: true, activeKey: true, uStart: true, allocatedMbps: true },
+    select: {
+      resourceType: true,
+      activeKey: true,
+      uStart: true,
+      ipRangeStart: true,
+      ipRangeEnd: true,
+      allocatedMbps: true,
+    },
   });
   for (const row of createdKeys) {
-    if (row.resourceType === "rack" || row.resourceType === "broadband") {
-      assert(row.activeKey === null, "机柜/宽带 activeKey 应为 NULL");
+    if (
+      row.resourceType === "rack" ||
+      row.resourceType === "broadband" ||
+      row.resourceType === "ipRange"
+    ) {
+      assert(row.activeKey === null, "机柜/宽带/IP 区间 activeKey 应为 NULL");
     } else {
       assert(row.activeKey !== null, "单一资源 activeKey 不应为 NULL");
     }
   }
-  console.log("PASS 多客户 8 类资源批量保存");
+  console.log("PASS 多客户 9 类资源批量保存");
 
   // 7. 同一批次先释放、再复用同一机柜区间。
   const rackAllocation = batchResult.creates.find((row) => row.resourceType === "rack")!;
@@ -522,6 +546,140 @@ async function main() {
     );
   });
   console.log("PASS 宽带客户缓存重算");
+
+  // 13. IP 区间：自动生成地址、区间/单 IP 互斥、释放后客户缓存清理。
+  const rangeBlock = await prisma.$transaction(async (tx) => {
+    const validated = await validateBlockInput(tx, {
+      cidr: "10.40.0.0-10.40.0.15",
+      status: "active",
+      role: "other",
+      supplierId: supplier.id,
+    });
+    const block = await tx.ipBlock.create({
+      data: {
+        cidr: validated.cidr,
+        kind: validated.kind,
+        rangeStart: validated.rangeStart,
+        rangeEnd: validated.rangeEnd,
+        ipVersion: validated.ipVersion,
+        status: "active",
+        role: "other",
+        supplierId: supplier.id,
+      },
+    });
+    const ref = {
+      id: block.id,
+      cidr: validated.cidr,
+      kind: validated.kind,
+      rangeStart: validated.rangeStart,
+      rangeEnd: validated.rangeEnd,
+      ipVersion: validated.ipVersion,
+      supplierId: supplier.id,
+    };
+    const generated = await syncRangeAddresses(tx, ref);
+    assert(generated.created === 16, "区间应自动生成 16 个地址");
+    assert(
+      (await tx.ipAddress.count({ where: { blockId: block.id } })) === 16,
+      "区间内地址数应为 16",
+    );
+    const again = await syncRangeAddresses(tx, ref);
+    assert(
+      again.created === 0 && again.reused === 16,
+      "区间地址同步应幂等，不重复创建",
+    );
+    return block;
+  });
+  console.log("PASS IP 区间自动生成地址与幂等同步");
+
+  await prisma.$transaction(async (tx) => {
+    const rangeAllocation = await createAllocation(tx, {
+      customerId: customerA.id,
+      resourceType: "ipRange",
+      resourceId: rangeBlock.id,
+      ipRangeStart: "10.40.0.4",
+      ipRangeEnd: "10.40.0.7",
+      allocatedAt: "2026-11-01",
+    });
+    const inherited = await tx.ipAddress.findMany({
+      where: { blockId: rangeBlock.id, customerId: customerA.id },
+      select: { address: true },
+      orderBy: { address: "asc" },
+    });
+    assert(inherited.length === 4, "区间分配应把 4 个地址写入客户缓存");
+    assert(
+      (await tx.ipBlock.findUniqueOrThrow({ where: { id: rangeBlock.id } })).customerId === null,
+      "区间分配不应写 IpBlock.customerId 缓存",
+    );
+    await expectCode("IP_RANGE_OVERLAP", () =>
+      createAllocation(tx, {
+        customerId: customerB.id,
+        resourceType: "ipRange",
+        resourceId: rangeBlock.id,
+        ipRangeStart: "10.40.0.6",
+        ipRangeEnd: "10.40.0.9",
+        allocatedAt: "2026-11-01",
+      }),
+    );
+    await expectCode("IP_RANGE_OUTSIDE_BLOCK", () =>
+      createAllocation(tx, {
+        customerId: customerB.id,
+        resourceType: "ipRange",
+        resourceId: rangeBlock.id,
+        ipRangeStart: "10.40.0.0",
+        ipRangeEnd: "10.40.0.16",
+        allocatedAt: "2026-11-01",
+      }),
+    );
+    await expectCode("IP_RANGE_TOO_LARGE", () =>
+      createAllocation(tx, {
+        customerId: customerB.id,
+        resourceType: "ipRange",
+        resourceId: rangeBlock.id,
+        ipRangeStart: "10.40.0.0",
+        ipRangeEnd: "10.40.16.0",
+        allocatedAt: "2026-11-01",
+      }),
+    );
+    const singleIp = await tx.ipAddress.findFirstOrThrow({
+      where: { blockId: rangeBlock.id, address: "10.40.0.12" },
+    });
+    const coveredIp = await tx.ipAddress.findFirstOrThrow({
+      where: { blockId: rangeBlock.id, address: "10.40.0.5" },
+    });
+    const single = await createAllocation(tx, {
+      customerId: customerB.id,
+      resourceType: "ipAddress",
+      resourceId: singleIp.id,
+      allocatedAt: "2026-11-01",
+    });
+    await expectCode("IP_IN_ALLOCATED_RANGE", () =>
+      createAllocation(tx, {
+        customerId: customerB.id,
+        resourceType: "ipAddress",
+        resourceId: coveredIp.id,
+        allocatedAt: "2026-11-01",
+      }),
+    );
+    await expectCode("IP_RANGE_HAS_ALLOCATED_ADDRESS", () =>
+      createAllocation(tx, {
+        customerId: customerB.id,
+        resourceType: "ipRange",
+        resourceId: rangeBlock.id,
+        ipRangeStart: "10.40.0.10",
+        ipRangeEnd: "10.40.0.13",
+        allocatedAt: "2026-11-01",
+      }),
+    );
+    await releaseAllocation(tx, single.allocation.id, "2026-11-03");
+    await releaseAllocation(tx, rangeAllocation.allocation.id, "2026-11-03");
+    assert(
+      (await tx.ipAddress.count({
+        where: { blockId: rangeBlock.id, customerId: { not: null } },
+      })) === 0,
+      "释放区间分配后地址客户缓存应清空",
+    );
+  });
+  console.log("PASS IP 区间分配互斥、单 IP 反向校验与释放清理");
 
   console.log(`\n全部业务规则测试通过（供应商 ${supplier.name}，机柜 ${rangeRack.code} 等）。`);
 }

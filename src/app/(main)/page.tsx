@@ -185,7 +185,7 @@ export default function DashboardPage() {
                 key: b.id,
                 label: b.cidr,
                 value: b.percent ?? 0,
-                hint: `${b.used}/${b.total ?? "?"}`,
+                hint: `已分配 ${b.allocated}/${b.total ?? "?"} · 已录入 ${b.entered}`,
               }))}
             />
           </Card>

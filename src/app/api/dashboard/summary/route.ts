@@ -133,8 +133,11 @@ export async function GET(req: NextRequest) {
     const flatBlocks: Array<{
       id: string;
       cidr: string;
+      kind: string;
       percent: number | null;
       used: number;
+      entered: number;
+      allocated: number;
       total: number | null;
     }> = [];
     const walk = (nodes: typeof blockTree) => {
@@ -142,8 +145,11 @@ export async function GET(req: NextRequest) {
         flatBlocks.push({
           id: n.id,
           cidr: n.cidr,
+          kind: n.kind,
           percent: n.percent,
           used: n.used,
+          entered: n.entered,
+          allocated: n.allocated,
           total: n.total,
         });
         walk(n.children);

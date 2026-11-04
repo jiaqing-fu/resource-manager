@@ -16,7 +16,7 @@ import {
 
 export const dynamic = "force-dynamic";
 
-/** 单个客户的有效分配 + 8 类资源可选列表，供批量分配工作台使用。 */
+/** 单个客户的有效分配 + 9 类资源可选列表，供批量分配工作台使用。 */
 export async function GET(req: NextRequest) {
   try {
     await requireUser(req);
@@ -31,7 +31,15 @@ export async function GET(req: NextRequest) {
         orderBy: [{ resourceType: "asc" }, { allocatedAt: "desc" }],
         include: {
           rack: { select: { id: true, code: true, location: true, uStart: true, uEnd: true } },
-          ipBlock: { select: { id: true, cidr: true } },
+          ipBlock: {
+            select: {
+              id: true,
+              cidr: true,
+              kind: true,
+              rangeStart: true,
+              rangeEnd: true,
+            },
+          },
           ipAddress: { select: { id: true, address: true } },
           vlan: { select: { id: true, vid: true, name: true } },
           vxlan: { select: { id: true, vni: true, name: true } },

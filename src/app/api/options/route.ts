@@ -75,6 +75,9 @@ export async function GET(req: NextRequest) {
         select: {
           id: true,
           cidr: true,
+          kind: true,
+          rangeStart: true,
+          rangeEnd: true,
           status: true,
           supplierId: true,
           customerId: true,
@@ -83,6 +86,7 @@ export async function GET(req: NextRequest) {
       }),
       prisma.ipAddress.findMany({
         orderBy: { address: "asc" },
+        take: 5000,
         select: {
           id: true,
           address: true,

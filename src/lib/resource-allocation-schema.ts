@@ -1,19 +1,52 @@
 import { z } from "zod";
 import { ALLOCATION_RESOURCE_TYPES, ALLOCATION_STATUS } from "@/lib/enums";
+import { parseIpRange } from "@/lib/ip";
 import { nullableDateStr, optionalText, requiredText, zEnum } from "@/lib/validators";
 
 const optionalU = z.coerce.number().int().min(1, "U 位至少为 1").max(100, "U 位不能超过 100");
+const optionalIp = optionalText(64);
 
-export const resourceAllocationSchema = z.object({
-  customerId: requiredText("客户", 100),
-  resourceType: zEnum(ALLOCATION_RESOURCE_TYPES, "资源类型"),
-  resourceId: requiredText("资源", 100),
-  uStart: optionalU.optional(),
-  uEnd: optionalU.optional(),
-  allocatedMbps: z.coerce.number().int().positive("MBPS 必须大于 0").optional(),
-  allocatedAt: nullableDateStr,
-  notes: optionalText(2000),
-});
+function refineIpRange(
+  value: {
+    resourceType: string;
+    ipRangeStart?: string | null;
+    ipRangeEnd?: string | null;
+  },
+  ctx: z.RefinementCtx,
+) {
+  if (value.resourceType !== "ipRange") return;
+  if (!value.ipRangeStart || !value.ipRangeEnd) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["ipRangeStart"],
+      message: "IP 区间分配必须填写起始 IP 和结束 IP",
+    });
+    return;
+  }
+  const range = parseIpRange(`${value.ipRangeStart}-${value.ipRangeEnd}`);
+  if (!range || range.version !== 4) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["ipRangeStart"],
+      message: "IP 区间格式不正确，起止地址必须为 IPv4",
+    });
+  }
+}
+
+export const resourceAllocationSchema = z
+  .object({
+    customerId: requiredText("客户", 100),
+    resourceType: zEnum(ALLOCATION_RESOURCE_TYPES, "资源类型"),
+    resourceId: requiredText("资源", 100),
+    uStart: optionalU.optional(),
+    uEnd: optionalU.optional(),
+    ipRangeStart: optionalIp,
+    ipRangeEnd: optionalIp,
+    allocatedMbps: z.coerce.number().int().positive("MBPS 必须大于 0").optional(),
+    allocatedAt: nullableDateStr,
+    notes: optionalText(2000),
+  })
+  .superRefine(refineIpRange);
 
 export const resourceAllocationReleaseSchema = z.object({
   releasedAt: nullableDateStr,
@@ -27,9 +60,12 @@ const batchCreateSchema = z
     resourceId: requiredText("资源", 100),
     uStart: optionalU.optional(),
     uEnd: optionalU.optional(),
+    ipRangeStart: optionalIp,
+    ipRangeEnd: optionalIp,
     allocatedMbps: z.coerce.number().int().positive("MBPS 必须大于 0").optional(),
   })
   .superRefine((value, ctx) => {
+    refineIpRange(value, ctx);
     if (value.resourceType === "rack") {
       if (value.uStart === undefined || value.uEnd === undefined) {
         ctx.addIssue({
