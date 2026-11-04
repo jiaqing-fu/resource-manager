@@ -1,0 +1,154 @@
+import { NextRequest } from "next/server";
+import type { Prisma } from "@prisma/client";
+import { prisma } from "@/lib/db";
+import {
+  ApiError,
+  getPaging,
+  handleApiError,
+  jsonOk,
+  listResult,
+  queryValue,
+  readJson,
+  requireUser,
+} from "@/lib/api";
+import { IP_BLOCK_ROLES, IP_BLOCK_STATUS } from "@/lib/enums";
+import { ipBlockSchema } from "@/lib/ip-block-schema";
+import { parseCidr, usableCount } from "@/lib/ip";
+import { recomputeBlockParents, validateBlockInput } from "@/server/services/ipam";
+import {
+  assertSupplierConsistent,
+  resolveSupplierForCreate,
+} from "@/server/services/supplier-requirements";
+import { writeChangeLog } from "@/lib/changelog";
+
+export const dynamic = "force-dynamic";
+
+export async function GET(req: NextRequest) {
+  try {
+    await requireUser(req);
+    const paging = getPaging(req);
+    const where: Prisma.IpBlockWhereInput = {};
+    if (paging.keyword) {
+      const kw = paging.keyword;
+      const or: Prisma.IpBlockWhereInput[] = [
+        { cidr: { contains: kw } },
+        { description: { contains: kw } },
+        { gateway: { contains: kw } },
+        { supplier: { is: { name: { contains: kw } } } },
+        { customer: { is: { name: { contains: kw } } } },
+        { vlan: { is: { name: { contains: kw } } } },
+      ];
+      if (/^\d+$/.test(kw)) or.push({ vlan: { is: { vid: Number(kw) } } });
+      where.OR = or;
+    }
+    const status = queryValue(req, "status");
+    const role = queryValue(req, "role");
+    const parentId = queryValue(req, "parentId");
+    const supplierId = queryValue(req, "supplierId");
+    const customerId = queryValue(req, "customerId");
+    const vlanId = queryValue(req, "vlanId");
+    if (status && IP_BLOCK_STATUS.some((o) => o.value === status)) where.status = status;
+    if (role && IP_BLOCK_ROLES.some((o) => o.value === role)) where.role = role;
+    if (parentId) where.parentId = parentId;
+    if (supplierId) where.supplierId = supplierId;
+    if (customerId) where.customerId = customerId;
+    if (vlanId) where.vlanId = vlanId;
+
+    const [rows, total] = await Promise.all([
+      prisma.ipBlock.findMany({
+        where,
+        orderBy: [{ cidr: "asc" }],
+        skip: paging.skip,
+        take: paging.pageSize,
+        include: {
+          parent: { select: { id: true, cidr: true } },
+          supplier: { select: { id: true, name: true } },
+          customer: { select: { id: true, name: true } },
+          vlan: { select: { id: true, vid: true, name: true } },
+          _count: { select: { children: true, ipAddresses: true } },
+        },
+      }),
+      prisma.ipBlock.count({ where }),
+    ]);
+    const items = rows.map((r) => {
+      const parsed = parseCidr(r.cidr);
+      return {
+        ...r,
+        version: parsed?.version ?? 4,
+        prefix: parsed?.prefix ?? null,
+        usable: parsed ? usableCount(parsed.version, parsed.prefix) : null,
+      };
+    });
+    return jsonOk(listResult(items, total, paging));
+  } catch (error) {
+    return handleApiError(error);
+  }
+}
+
+export async function POST(req: NextRequest) {
+  try {
+    const user = await requireUser(req);
+    const body = ipBlockSchema.parse(await readJson(req));
+    const created = await prisma.$transaction(async (tx) => {
+      const normalized = await validateBlockInput(tx, body);
+      const dup = await tx.ipBlock.findUnique({ where: { cidr: normalized.cidr } });
+      if (dup) throw new ApiError(409, `IP 段 ${normalized.cidr} 已存在`, "DUPLICATE_CIDR");
+
+      const vlan = body.vlanId
+        ? await tx.vlan.findUnique({
+            where: { id: body.vlanId },
+            select: { id: true, supplierId: true },
+          })
+        : null;
+      if (body.vlanId && !vlan) {
+        throw new ApiError(422, "所选 VLAN 不存在", "VLAN_NOT_FOUND");
+      }
+      const parent = normalized.parentId
+        ? await tx.ipBlock.findUnique({
+            where: { id: normalized.parentId },
+            select: { supplierId: true },
+          })
+        : null;
+      const supplierId = await resolveSupplierForCreate(tx, body.supplierId, [
+        parent?.supplierId,
+        vlan?.supplierId,
+      ]);
+      assertSupplierConsistent(supplierId, vlan?.supplierId ?? null, " VLAN ");
+
+      const block = await tx.ipBlock.create({
+        data: {
+          cidr: normalized.cidr,
+          ipVersion: normalized.ipVersion,
+          parentId: normalized.parentId,
+          status: body.status,
+          role: body.role,
+          vlanId: body.vlanId ?? null,
+          supplierId,
+          customerId: null,
+          gateway: body.gateway ?? null,
+          description: body.description ?? null,
+          assignedAt: body.assignedAt ?? null,
+        },
+      });
+      await recomputeBlockParents(tx);
+      await writeChangeLog(tx, {
+        user,
+        resource: "ipBlock",
+        recordId: block.id,
+        action: "CREATE",
+        summary: `创建 IP 段 ${block.cidr}`,
+        after: block,
+      });
+      return tx.ipBlock.findUniqueOrThrow({
+        where: { id: block.id },
+        include: {
+          parent: { select: { id: true, cidr: true } },
+          supplier: { select: { id: true, name: true } },
+        },
+      });
+    });
+    return jsonOk(created, 201);
+  } catch (error) {
+    return handleApiError(error);
+  }
+}

@@ -1,0 +1,26 @@
+[Unit]
+Description=Resource Manager (technical department intranet)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lcadmin
+Group=lcadmin
+WorkingDirectory=/home/lcadmin/APP/resource-manager
+EnvironmentFile=/home/lcadmin/APP/resource-manager/.env
+Environment=NODE_ENV=production
+Environment=TZ=Asia/Shanghai
+Environment=PATH=/home/lcadmin/APP/node-v24.15.0-linux-x64/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/lcadmin/APP/node-v24.15.0-linux-x64/bin/node /home/lcadmin/APP/resource-manager/node_modules/next/dist/bin/next start -H 0.0.0.0 -p 3000
+Restart=always
+RestartSec=3
+KillSignal=SIGINT
+TimeoutStopSec=30
+LimitNOFILE=65535
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

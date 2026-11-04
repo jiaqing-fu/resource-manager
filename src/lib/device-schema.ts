@@ -1,0 +1,56 @@
+import { z } from "zod";
+import { DEVICE_FACES, DEVICE_ROLES, DEVICE_STATUS, DEVICE_TYPES } from "@/lib/enums";
+import {
+  nullableDateStr,
+  nullableId,
+  optionalInt,
+  optionalText,
+  requiredText,
+  zEnum,
+} from "@/lib/validators";
+
+export const deviceSchema = z.object({
+  name: requiredText("设备名称", 100),
+  type: zEnum(DEVICE_TYPES, "设备类型").default("router"),
+  role: zEnum(DEVICE_ROLES, "设备角色").default("access"),
+  status: zEnum(DEVICE_STATUS, "设备状态").default("active"),
+  manufacturer: optionalText(100),
+  model: optionalText(100),
+  serialNo: optionalText(100),
+  assetTag: optionalText(100),
+  osVersion: optionalText(50),
+  mac: optionalText(50),
+  rackId: nullableId,
+  uStart: optionalInt,
+  uHeight: z.coerce.number().int().min(1, "设备高度至少为 1U").max(100).default(1),
+  face: zEnum(DEVICE_FACES, "面板").default("front"),
+  supplierId: nullableId,
+  owner: optionalText(50),
+  lastInventoryAt: nullableDateStr,
+  purchaseDate: nullableDateStr,
+  warrantyEnd: nullableDateStr,
+  notes: optionalText(1000),
+});
+
+export const deviceUpdateSchema = z.object({
+  name: requiredText("设备名称", 100).optional(),
+  type: zEnum(DEVICE_TYPES, "设备类型").optional(),
+  role: zEnum(DEVICE_ROLES, "设备角色").optional(),
+  status: zEnum(DEVICE_STATUS, "设备状态").optional(),
+  manufacturer: optionalText(100),
+  model: optionalText(100),
+  serialNo: optionalText(100),
+  assetTag: optionalText(100),
+  osVersion: optionalText(50),
+  mac: optionalText(50),
+  rackId: nullableId,
+  uStart: optionalInt,
+  uHeight: z.coerce.number().int().min(1).max(100).optional(),
+  face: zEnum(DEVICE_FACES, "面板").optional(),
+  supplierId: nullableId,
+  owner: optionalText(50),
+  lastInventoryAt: nullableDateStr,
+  purchaseDate: nullableDateStr,
+  warrantyEnd: nullableDateStr,
+  notes: optionalText(1000),
+});

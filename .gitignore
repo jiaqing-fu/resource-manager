@@ -1,0 +1,13 @@
+node_modules/
+.next/
+out/
+build/
+.env
+.env.*
+!.env.example
+# 数据库、备份、通知副本、初始密码等运行时文件一律不提交
+data/
+*.log
+.DS_Store
+next-env.d.ts
+tsconfig.tsbuildinfo

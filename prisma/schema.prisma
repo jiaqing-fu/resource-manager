@@ -1,0 +1,597 @@
+// 技术部资源管理系统 —— 数据模型
+// 枚举统一使用字符串，由 src/lib/enums.ts 维护取值与中文标签，便于后续扩展。
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  username     String   @unique
+  passwordHash String
+  displayName  String
+  role         String   @default("USER") // ADMIN / USER
+  active       Boolean  @default(true)
+  tokenVersion Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model Supplier {
+  id       String     @id @default(cuid())
+  name     String
+  level    Int // 1 / 2
+  parentId String?
+  parent   Supplier?  @relation("SupplierTree", fields: [parentId], references: [id], onDelete: Restrict)
+  children Supplier[] @relation("SupplierTree")
+
+  category    String  @default("other") // carrier / idc / vendor / other
+  asn         Int?
+  contactName String?
+  phone       String?
+  email       String?
+  address     String?
+  status      String  @default("active") // active / inactive
+  notes       String?
+
+  contacts    SupplierContact[]
+  ipBlocks    IpBlock[]
+  ipAddresses IpAddress[]
+  vlans       Vlan[]
+  vxlans      Vxlan[]
+  broadbands  Broadband[]
+  racks       Rack[]
+  devices     Device[]
+  lines       Line[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([level, parentId])
+  @@index([name])
+}
+
+model Salesperson {
+  id        String     @id @default(cuid())
+  name      String     @unique
+  phone     String?
+  status    String     @default("active") // active / inactive
+  notes     String?
+  customers Customer[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+}
+
+model Customer {
+  id       String     @id @default(cuid())
+  name     String
+  level    Int // 1 / 2
+  parentId String?
+  parent   Customer?  @relation("CustomerTree", fields: [parentId], references: [id], onDelete: Restrict)
+  children Customer[] @relation("CustomerTree")
+
+  salespersonId String?
+  salesperson   Salesperson? @relation(fields: [salespersonId], references: [id], onDelete: Restrict)
+
+  contactName String?
+  phone       String?
+  email       String?
+  address     String?
+  status      String  @default("active")
+  notes       String?
+
+  allocations   ResourceAllocation[]
+  ipBlocks      IpBlock[]
+  ipAddresses   IpAddress[]
+  vlans         Vlan[]
+  vxlans        Vxlan[]
+  broadbands    Broadband[]
+  racks         Rack[]
+  devices       Device[]
+  lines         Line[]
+  customerTests CustomerTest[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([level, parentId])
+  @@index([name])
+  @@index([salespersonId])
+}
+
+model SupplierContact {
+  id         String   @id @default(cuid())
+  supplierId String
+  supplier   Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+
+  name      String
+  role      String?
+  phone     String?
+  email     String?
+  wechat    String?
+  isPrimary Boolean @default(false)
+  notes     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([supplierId])
+}
+
+model Rack {
+  id       String  @id @default(cuid())
+  location String? // 位置，原机房信息在迁移时回填
+  code     String // 同一物理机柜编号可有多条区间记录
+  status   String  @default("active") // active / planned / reserved / deprecated
+  width    Int     @default(19) // 19 / 23
+  uStart   Int     @default(1) // 物理机柜的起始 U 位
+  uEnd     Int     @default(42) // 物理机柜的结束 U 位
+  power    String?
+  serial   String?
+
+  supplierId String?
+  supplier   Supplier? @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  customerId String? // 分配缓存，只由 ResourceAllocation 服务维护
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: Restrict)
+
+  notes String?
+
+  devices      Device[]
+  ipAddresses  IpAddress[]
+  terminations LineTermination[]
+  broadbands   Broadband[]
+  allocations  ResourceAllocation[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([code, uStart, uEnd])
+  @@index([code])
+  @@index([status])
+  @@index([supplierId])
+  @@index([customerId])
+}
+
+model Vlan {
+  id          String  @id @default(cuid())
+  vid         Int
+  name        String
+  status      String  @default("active") // active / reserved / deprecated
+  description String?
+
+  supplierId String?
+  supplier   Supplier? @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  customerId String? // 分配缓存
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: Restrict)
+
+  vxlan       Vxlan?
+  ipBlocks    IpBlock[]
+  allocations ResourceAllocation[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([supplierId, vid])
+  @@index([supplierId])
+  @@index([customerId])
+}
+
+model Vxlan {
+  id          String  @id @default(cuid())
+  vni         Int     @unique
+  name        String?
+  status      String  @default("active") // active / planned / deprecated
+  description String?
+
+  vlanId String? @unique
+  vlan   Vlan?   @relation(fields: [vlanId], references: [id], onDelete: SetNull)
+
+  supplierId String?
+  supplier   Supplier? @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  customerId String? // 分配缓存
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: Restrict)
+
+  allocations ResourceAllocation[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([supplierId])
+  @@index([customerId])
+}
+
+model IpBlock {
+  id       String    @id @default(cuid())
+  cidr     String    @unique
+  parentId String?
+  parent   IpBlock?  @relation("IpBlockTree", fields: [parentId], references: [id], onDelete: Restrict)
+  children IpBlock[] @relation("IpBlockTree")
+
+  ipVersion Int // 4 / 6
+  status    String @default("active") // active / container / reserved / deprecated
+  role      String @default("other") // transit / customer_pool / internal / other
+
+  vlanId String?
+  vlan   Vlan?   @relation(fields: [vlanId], references: [id], onDelete: Restrict)
+
+  supplierId String?
+  supplier   Supplier? @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  customerId String? // 分配缓存
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: Restrict)
+
+  gateway     String?
+  description String?
+  assignedAt  String? // YYYY-MM-DD
+
+  ipAddresses IpAddress[]
+  allocations ResourceAllocation[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([parentId, status])
+  @@index([supplierId])
+  @@index([customerId])
+  @@index([vlanId])
+}
+
+model IpAddress {
+  id      String   @id @default(cuid())
+  address String   @unique
+  blockId String?
+  block   IpBlock? @relation(fields: [blockId], references: [id], onDelete: Restrict)
+
+  status String @default("active") // active / reserved / deprecated / dhcp / slaac
+  role   String @default("other") // management / customer / transit / vip / other
+
+  supplierId String?
+  supplier   Supplier? @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  customerId String? // 分配缓存
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: Restrict)
+
+  rackId   String?
+  rack     Rack?   @relation(fields: [rackId], references: [id], onDelete: SetNull)
+  deviceId String?
+  device   Device? @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+  lineId   String?
+  line     Line?   @relation(fields: [lineId], references: [id], onDelete: SetNull)
+
+  isPrimary   Boolean @default(false)
+  dnsName     String?
+  description String?
+  assignedAt  String? // YYYY-MM-DD
+
+  endpoints  BusinessSystemEndpoint[]
+  broadbands Broadband[]
+  allocations ResourceAllocation[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([blockId])
+  @@index([supplierId])
+  @@index([customerId])
+  @@index([deviceId])
+  @@index([lineId])
+}
+
+model Device {
+  id String @id @default(cuid())
+
+  name   String
+  type   String @default("router") // router / switch / firewall / ap / other
+  role   String @default("access") // core / aggregation / access / customer_edge / other
+  status String @default("active") // active / planned / staged / inventory / offline / failed / decommissioning
+
+  manufacturer String?
+  model        String?
+  serialNo     String? @unique
+  assetTag     String?
+  osVersion    String?
+  mac          String?
+
+  rackId String?
+  rack   Rack?   @relation(fields: [rackId], references: [id], onDelete: Restrict)
+
+  uStart  Int?
+  uHeight Int    @default(1)
+  face    String @default("front") // front / rear
+
+  supplierId String?
+  supplier   Supplier? @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  customerId String? // 分配缓存
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: Restrict)
+
+  owner           String?
+  lastInventoryAt String? // YYYY-MM-DD
+  purchaseDate    String?
+  warrantyEnd     String?
+  notes           String?
+
+  ipAddresses  IpAddress[]
+  terminations LineTermination[]
+  broadbands   Broadband[]
+  allocations  ResourceAllocation[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([rackId, status])
+  @@index([type])
+  @@index([warrantyEnd])
+}
+
+model Line {
+  id   String @id @default(cuid())
+  code String @unique
+  name String
+
+  type   String @default("internet") // internet / mpls / dark_fiber / point_to_point / other
+  status String @default("active") // planned / provisioning / active / offline / deprovisioned
+
+  supplierId String?
+  supplier   Supplier? @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  customerId String? // 分配缓存
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: Restrict)
+
+  bandwidthMbps   Int?
+  monthlyFeeCents Int?
+  circuitNo       String?
+  installDate     String? // YYYY-MM-DD
+  expireDate      String?
+  description     String?
+
+  terminations LineTermination[]
+  ipAddresses  IpAddress[]
+  broadbands   Broadband[]
+  allocations  ResourceAllocation[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([expireDate])
+}
+
+model LineTermination {
+  id     String @id @default(cuid())
+  lineId String
+  line   Line   @relation(fields: [lineId], references: [id], onDelete: Cascade)
+
+  side String // A / Z
+
+  rackId   String?
+  rack     Rack?   @relation(fields: [rackId], references: [id], onDelete: SetNull)
+  deviceId String?
+  device   Device? @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+
+  port        String?
+  description String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([lineId, side])
+  @@index([deviceId])
+}
+
+model Broadband {
+  id   String @id @default(cuid())
+  name String @unique // 名称/编号，作为 Excel 自然键
+
+  supplierId String?
+  supplier   Supplier? @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  customerId String? // 分配缓存
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: Restrict)
+
+  bandwidthMbps Int?
+  status        String  @default("active") // active / planned / suspended / terminated
+  expireDate    String? // YYYY-MM-DD
+
+  account        String?
+  password       String?
+  installAddress String?
+
+  rackId      String?
+  rack        Rack?      @relation(fields: [rackId], references: [id], onDelete: SetNull)
+  deviceId    String?
+  device      Device?    @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+  lineId      String?
+  line        Line?      @relation(fields: [lineId], references: [id], onDelete: SetNull)
+  ipAddressId String?
+  ipAddress   IpAddress? @relation(fields: [ipAddressId], references: [id], onDelete: SetNull)
+
+  monthlyFeeCents Int?
+  contractNo      String?
+  description     String?
+  notes           String?
+
+  allocations ResourceAllocation[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([supplierId])
+  @@index([customerId])
+  @@index([status, expireDate])
+}
+
+model ResourceAllocation {
+  id         String   @id @default(cuid())
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+
+  resourceType  String // rack / ipBlock / ipAddress / vlan / vxlan / broadband / line / device
+  resourceName  String // 分配时快照，资源删除后仍可追溯
+  supplierName  String? // 分配时快照
+  uStart        Int? // 机柜分配的子区间；其他类型为空
+  uEnd          Int?
+  allocatedMbps Int? // 宽带分配 MBPS；其他类型为空
+  activeKey     String? @unique // 六类单分配资源：`${resourceType}:${resourceId}`；rack/broadband 始终为 NULL
+
+  rackId      String?
+  rack        Rack?      @relation(fields: [rackId], references: [id], onDelete: SetNull)
+  ipBlockId   String?
+  ipBlock     IpBlock?   @relation(fields: [ipBlockId], references: [id], onDelete: SetNull)
+  ipAddressId String?
+  ipAddress   IpAddress? @relation(fields: [ipAddressId], references: [id], onDelete: SetNull)
+  vlanId      String?
+  vlan        Vlan?      @relation(fields: [vlanId], references: [id], onDelete: SetNull)
+  vxlanId     String?
+  vxlan       Vxlan?     @relation(fields: [vxlanId], references: [id], onDelete: SetNull)
+  broadbandId String?
+  broadband   Broadband? @relation(fields: [broadbandId], references: [id], onDelete: SetNull)
+  lineId      String?
+  line        Line?      @relation(fields: [lineId], references: [id], onDelete: SetNull)
+  deviceId    String?
+  device      Device?    @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+
+  allocatedAt DateTime  @default(now())
+  releasedAt  DateTime?
+  notes       String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([customerId, allocatedAt])
+  @@index([customerId, releasedAt])
+  @@index([resourceType, releasedAt])
+  @@index([rackId])
+  @@index([rackId, releasedAt])
+  @@index([ipBlockId])
+  @@index([ipAddressId])
+  @@index([vlanId])
+  @@index([vxlanId])
+  @@index([broadbandId])
+  @@index([broadbandId, releasedAt])
+  @@index([lineId])
+  @@index([deviceId])
+}
+
+model BusinessSystem {
+  id   String  @id @default(cuid())
+  name String
+  code String? @unique
+
+  owner       String
+  department  String?
+  environment String  @default("prod") // prod / staging / test
+  criticality String  @default("normal") // core / important / normal
+  status      String  @default("active") // active / planned / retired
+
+  url         String?
+  domain      String?
+  onlineDate  String?
+  description String?
+
+  endpoints BusinessSystemEndpoint[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+}
+
+model BusinessSystemEndpoint {
+  id       String         @id @default(cuid())
+  systemId String
+  system   BusinessSystem @relation(fields: [systemId], references: [id], onDelete: Cascade)
+
+  ipAddressId String?
+  ipAddress   IpAddress? @relation(fields: [ipAddressId], references: [id], onDelete: Restrict)
+  ipText      String?
+
+  protocol    String  @default("tcp") // tcp / udp / other
+  port        Int?
+  isPrimary   Boolean @default(false)
+  description String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([systemId])
+}
+
+model CustomerTest {
+  id         String    @id @default(cuid())
+  seqNo      Int       @unique // 服务层生成 max(seqNo)+1
+  customerId String?
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+
+  companyName String // 公司名称快照
+  salesperson String?
+  content     String?
+
+  startAt String // YYYY-MM-DD
+  endAt   String // YYYY-MM-DD
+
+  accepted  Boolean @default(false)
+  converted Boolean @default(false)
+  status    String? // passed / failed；为空时由服务端计算展示状态
+  notes     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([endAt, status])
+  @@index([customerId])
+  @@index([salesperson])
+}
+
+model ChangeLog {
+  id       String  @id @default(cuid())
+  userId   String?
+  username String
+  resource String
+  recordId String
+  action   String // CREATE / UPDATE / DELETE / IMPORT
+  summary  String
+  before   String?
+  after    String?
+
+  createdAt DateTime @default(now())
+
+  @@index([resource, recordId])
+  @@index([createdAt])
+}
+
+model Notification {
+  id           String @id @default(cuid())
+  title        String
+  recipient    String
+  cc           String?
+  subject      String?
+  contentJson  String // TipTap / ProseMirror JSON 字符串
+  contentText  String // 服务端从 JSON 派生，用于检索/纯文本邮件
+  signature    String?
+  documentDate String // YYYY-MM-DD
+
+  status       String    @default("draft") // draft / sent / failed
+  fromAddress  String?
+  sentAt       DateTime?
+  sentById     String?
+  sentByName   String?
+  messageId    String?
+  docxPath     String? // 仅文件名，相对 NOTIFICATION_STORAGE_DIR
+  docxFilename String?
+  lastError    String?
+  attemptCount Int       @default(0)
+
+  createdById   String?
+  createdByName String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([status, updatedAt])
+  @@index([sentAt])
+  @@index([createdById])
+}
