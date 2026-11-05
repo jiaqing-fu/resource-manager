@@ -272,9 +272,10 @@ model IpAddress {
   description String?
   assignedAt  String? // YYYY-MM-DD
 
-  endpoints  BusinessSystemEndpoint[]
-  broadbands Broadband[]
-  allocations ResourceAllocation[]
+  endpoints       BusinessSystemEndpoint[]
+  broadbands      Broadband[]
+  allocations     ResourceAllocation[]
+  allocationItems ResourceAllocationItem[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -464,6 +465,12 @@ model ResourceAllocation {
   releasedAt  DateTime?
   notes       String?
 
+  /** IP 区间/集合分配的实际占用单元；区间只是批量创建方式。 */
+  items ResourceAllocationItem[]
+
+  /** 机柜区间/集合分配的实际占用 U 位；父记录只是批量创建方式。 */
+  rackItems RackAllocationItem[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -481,6 +488,66 @@ model ResourceAllocation {
   @@index([broadbandId, releasedAt])
   @@index([lineId])
   @@index([deviceId])
+}
+
+/**
+ * IP 分配明细：每个 IP 一条，是占用/互斥/释放的权威来源。
+ * 同一地址最多只能有一条有效明细（迁移中建立了部分唯一索引）。
+ */
+model ResourceAllocationItem {
+  id           String @id @default(cuid())
+  allocationId String
+  allocation   ResourceAllocation @relation(fields: [allocationId], references: [id], onDelete: Cascade)
+
+  ipAddressId String?
+  ipAddress   IpAddress? @relation(fields: [ipAddressId], references: [id], onDelete: SetNull)
+
+  /** 规范化 IPv4 地址；IP 记录被删除后仍保留，用于历史追溯。 */
+  address String
+
+  releasedAt     DateTime?
+  releaseBatchId String?
+  releaseNote    String?
+  releasedByName String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([allocationId, address])
+  @@index([allocationId, releasedAt])
+  @@index([address, releasedAt])
+  @@index([ipAddressId])
+  @@index([releaseBatchId])
+}
+
+/**
+ * 机柜分配明细：每个 U 位一条，是占用/互斥/释放的权威来源。
+ * rackId 保存为快照字符串，机柜记录删除后仍可追溯；同一机柜的有效 U 位
+ * 通过迁移中的部分唯一索引保证不重复。
+ */
+model RackAllocationItem {
+  id           String @id @default(cuid())
+  allocationId String
+  allocation   ResourceAllocation @relation(fields: [allocationId], references: [id], onDelete: Cascade)
+
+  /** 机柜记录 ID 快照；不做外键，避免机柜删除破坏历史。 */
+  rackId String
+
+  /** U 位编号（整数，闭区间内的单点）。 */
+  uNumber Int
+
+  releasedAt     DateTime?
+  releaseBatchId String?
+  releaseNote    String?
+  releasedByName String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([allocationId, uNumber])
+  @@index([allocationId, releasedAt])
+  @@index([rackId, releasedAt])
+  @@index([releaseBatchId])
 }
 
 model BusinessSystem {

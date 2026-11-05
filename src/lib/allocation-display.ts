@@ -6,6 +6,12 @@ export type AllocationDisplayRow = {
   uEnd: number | null;
   ipRangeStart: string | null;
   ipRangeEnd: string | null;
+  /** IP 区间/集合分配的明细数量；未加载时省略。 */
+  ipItemCount?: number;
+  ipActiveCount?: number;
+  /** 机柜区间/集合分配的 U 位明细数量；未加载时省略。 */
+  rackItemCount?: number;
+  rackActiveCount?: number;
   allocatedMbps: number | null;
   rack: { code: string } | null;
   ipBlock: { cidr: string } | null;
@@ -19,16 +25,28 @@ export type AllocationDisplayRow = {
 
 export function allocationDisplayName(row: AllocationDisplayRow): string {
   switch (row.resourceType) {
-    case "rack":
-      return row.rack
+    case "rack": {
+      const base = row.rack
         ? `${row.rack.code} [${row.uStart ?? "?"}-${row.uEnd ?? "?"}]U`
         : row.resourceName;
+      const total = row.rackItemCount ?? 0;
+      const active = row.rackActiveCount ?? total;
+      if (total === 0) return base;
+      if (active === total) return `${base}（${total} 个 U）`;
+      return `${base}（剩余 ${active}/${total} 个 U）`;
+    }
     case "ipBlock":
       return row.ipBlock?.cidr ?? row.resourceName;
-    case "ipRange":
-      return row.ipBlock
+    case "ipRange": {
+      const base = row.ipBlock
         ? `${row.ipBlock.cidr} [${row.ipRangeStart ?? "?"}-${row.ipRangeEnd ?? "?"}]`
         : row.resourceName;
+      const total = row.ipItemCount ?? 0;
+      const active = row.ipActiveCount ?? total;
+      if (total === 0) return base;
+      if (active === total) return `${base}（${total} 个 IP）`;
+      return `${base}（剩余 ${active}/${total} 个 IP）`;
+    }
     case "ipAddress":
       return row.ipAddress?.address ?? row.resourceName;
     case "vlan":

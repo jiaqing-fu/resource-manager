@@ -12,9 +12,12 @@ import {
 } from "@/lib/api";
 import { resourceAllocationSchema } from "@/lib/resource-allocation-schema";
 import { allocationDisplayName } from "@/lib/allocation-display";
+import { parseIp } from "@/lib/ip";
 import {
   createAllocation,
   isAllocationResourceType,
+  loadIpAllocationCounts,
+  loadRackAllocationCounts,
 } from "@/server/services/allocations";
 import { writeChangeLog } from "@/lib/changelog";
 import { ApiError } from "@/lib/api";
@@ -38,7 +41,7 @@ export async function GET(req: NextRequest) {
 
     if (paging.keyword) {
       const kw = paging.keyword;
-      where.OR = [
+      const or: Prisma.ResourceAllocationWhereInput[] = [
         { resourceName: { contains: kw } },
         { supplierName: { contains: kw } },
         { notes: { contains: kw } },
@@ -52,6 +55,15 @@ export async function GET(req: NextRequest) {
         { line: { is: { code: { contains: kw } } } },
         { device: { is: { name: { contains: kw } } } },
       ];
+      // 输入 IP 时，同时匹配包含该地址的区间/集合分配明细（含已释放明细）。
+      const ip = parseIp(kw);
+      if (ip) {
+        or.push({
+          resourceType: "ipRange",
+          items: { some: { address: ip.canonical } },
+        });
+      }
+      where.OR = or;
     }
 
     const [rows, total] = await Promise.all([
@@ -82,10 +94,38 @@ export async function GET(req: NextRequest) {
       }),
       prisma.resourceAllocation.count({ where }),
     ]);
-    const items = rows.map((row) => ({
-      ...row,
-      currentResourceName: allocationDisplayName(row),
-    }));
+    const [ipCounts, rackCounts] = await Promise.all([
+      loadIpAllocationCounts(
+        prisma,
+        rows
+          .filter((row) => row.resourceType === "ipRange")
+          .map((row) => row.id),
+      ),
+      loadRackAllocationCounts(
+        prisma,
+        rows
+          .filter((row) => row.resourceType === "rack")
+          .map((row) => row.id),
+      ),
+    ]);
+    const items = rows.map((row) => {
+      const ipCount = ipCounts.get(row.id);
+      const rackCount = rackCounts.get(row.id);
+      return {
+        ...row,
+        ipItemCount: ipCount?.total ?? 0,
+        ipActiveCount: ipCount?.active ?? 0,
+        rackItemCount: rackCount?.total ?? 0,
+        rackActiveCount: rackCount?.active ?? 0,
+        currentResourceName: allocationDisplayName({
+          ...row,
+          ipItemCount: ipCount?.total ?? 0,
+          ipActiveCount: ipCount?.active ?? 0,
+          rackItemCount: rackCount?.total ?? 0,
+          rackActiveCount: rackCount?.active ?? 0,
+        }),
+      };
+    });
     return jsonOk(listResult(items, total, paging));
   } catch (error) {
     return handleApiError(error);
@@ -109,8 +149,10 @@ export async function POST(req: NextRequest) {
         notes: body.notes,
         uStart: body.uStart,
         uEnd: body.uEnd,
+        uList: body.uList,
         ipRangeStart: body.ipRangeStart,
         ipRangeEnd: body.ipRangeEnd,
+        ipList: body.ipList,
         allocatedMbps: body.allocatedMbps,
       });
       await writeChangeLog(tx, {

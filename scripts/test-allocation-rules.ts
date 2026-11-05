@@ -4,7 +4,10 @@ import { ApiError } from "../src/lib/api";
 import {
   assertRackAllocationsDisjoint,
   createAllocation,
+  listAvailableResources,
+  loadRackAllocationCounts,
   releaseAllocation,
+  releaseAllocations,
   saveBatchAllocations,
 } from "../src/server/services/allocations";
 import {
@@ -61,18 +64,24 @@ async function createDevice(
 async function main() {
   await prisma.$transaction(async (tx) => {
     await tx.changeLog.deleteMany();
+    await tx.rackAllocationItem.deleteMany();
+    await tx.resourceAllocationItem.deleteMany();
     await tx.resourceAllocation.deleteMany();
+    await tx.businessSystemEndpoint.deleteMany();
+    await tx.businessSystem.deleteMany();
     await tx.broadband.deleteMany();
     await tx.customerTest.deleteMany();
     await tx.lineTermination.deleteMany();
     await tx.line.deleteMany();
     await tx.ipAddress.deleteMany();
     await tx.device.deleteMany();
+    await tx.ipBlock.updateMany({ data: { parentId: null } });
     await tx.ipBlock.deleteMany();
     await tx.vxlan.deleteMany();
     await tx.vlan.deleteMany();
     await tx.rack.deleteMany();
     await tx.supplierContact.deleteMany();
+    await tx.supplier.updateMany({ data: { parentId: null } });
     await tx.supplier.deleteMany();
     await tx.customer.deleteMany();
   });
@@ -680,6 +689,454 @@ async function main() {
     );
   });
   console.log("PASS IP 区间分配互斥、单 IP 反向校验与释放清理");
+
+  // 14. 任意 IP 集合分配、奇数 IP 批量释放、释放记录与再分配。
+  const oddBlock = await prisma.$transaction(async (tx) => {
+    const validated = await validateBlockInput(tx, {
+      cidr: "10.41.0.0-10.41.0.63",
+      status: "active",
+      role: "other",
+      supplierId: supplier.id,
+    });
+    const block = await tx.ipBlock.create({
+      data: {
+        cidr: validated.cidr,
+        kind: validated.kind,
+        rangeStart: validated.rangeStart,
+        rangeEnd: validated.rangeEnd,
+        ipVersion: validated.ipVersion,
+        status: "active",
+        role: "other",
+        supplierId: supplier.id,
+      },
+    });
+    await syncRangeAddresses(tx, {
+      id: block.id,
+      cidr: validated.cidr,
+      kind: validated.kind,
+      rangeStart: validated.rangeStart,
+      rangeEnd: validated.rangeEnd,
+      ipVersion: validated.ipVersion,
+      supplierId: supplier.id,
+    });
+    return block;
+  });
+
+  await prisma.$transaction(async (tx) => {
+    const setAllocation = await createAllocation(tx, {
+      customerId: customerA.id,
+      resourceType: "ipRange",
+      resourceId: oddBlock.id,
+      ipList: "10.41.0.0, 10.41.0.2, 10.41.0.4-10.41.0.6",
+      allocatedAt: "2026-11-01",
+    });
+    assert(
+      setAllocation.allocation.ipRangeStart === "10.41.0.0" &&
+        setAllocation.allocation.ipRangeEnd === "10.41.0.6",
+      "非连续集合应记录最小/最大地址",
+    );
+    const items = await tx.resourceAllocationItem.findMany({
+      where: { allocationId: setAllocation.allocation.id },
+      orderBy: { address: "asc" },
+    });
+    assert(items.length === 5, "非连续集合应生成 5 条明细");
+    assert(
+      (await tx.resourceAllocation.count({
+        where: {
+          resourceType: "ipRange",
+          items: { some: { address: "10.41.0.5" } },
+        },
+      })) === 1,
+      "按区间内 IP 应能反查分配记录",
+    );
+
+    const partial = await releaseAllocation(tx, setAllocation.allocation.id, {
+      ipList: "10.41.0.0,10.41.0.2",
+      releasedAt: "2026-11-03",
+      releaseNote: "释放偶数位前的两个 IP",
+      releasedByName: "测试员",
+    });
+    assert(
+      partial.releasedCount === 2 &&
+        partial.remainingCount === 3 &&
+        !partial.parentReleased,
+      "部分释放应保留父分配和 3 个有效 IP",
+    );
+    const releasedItems = await tx.resourceAllocationItem.findMany({
+      where: {
+        allocationId: setAllocation.allocation.id,
+        releasedAt: { not: null },
+      },
+      select: { releaseBatchId: true, releasedByName: true, releaseNote: true },
+    });
+    assert(releasedItems.length === 2, "应产生 2 条释放记录");
+    assert(
+      new Set(releasedItems.map((item) => item.releaseBatchId)).size === 1,
+      "同一次部分释放应共用一个批次号",
+    );
+    assert(
+      releasedItems.every(
+        (item) =>
+          item.releasedByName === "测试员" &&
+          item.releaseNote === "释放偶数位前的两个 IP",
+      ),
+      "释放记录应保存操作人与备注",
+    );
+
+    const availableBlocks = await listAvailableResources(tx, "ipRange");
+    const availableBlock = availableBlocks.find(
+      (row) => row.blockId === oddBlock.id,
+    );
+    assert(
+      availableBlock?.freeIpRanges?.some(
+        (range) =>
+          range.startIp === "10.41.0.0" && range.endIp === "10.41.0.3",
+      ),
+      "部分释放后空闲区间应从已释放 IP 重新计算",
+    );
+    const availableIps = await listAvailableResources(
+      tx,
+      "ipAddress",
+      "10.41.0.",
+    );
+    assert(
+      availableIps.some((row) => row.name === "10.41.0.0"),
+      "已释放 IP 应重新出现在单 IP 可选列表",
+    );
+    assert(
+      !availableIps.some((row) => row.name === "10.41.0.4"),
+      "有效明细中的 IP 不应出现在单 IP 可选列表",
+    );
+
+    await expectCode("IP_NOT_IN_ALLOCATION", () =>
+      releaseAllocation(tx, setAllocation.allocation.id, {
+        ipList: "10.41.0.7",
+        releasedAt: "2026-11-03",
+      }),
+    );
+    await expectCode("IP_ALREADY_RELEASED", () =>
+      releaseAllocation(tx, setAllocation.allocation.id, {
+        ipList: "10.41.0.0",
+        releasedAt: "2026-11-03",
+      }),
+    );
+
+    // 已释放的 .0 可以重新做单 IP 分配，并再次占用。
+    const releasedIp = await tx.ipAddress.findFirstOrThrow({
+      where: { blockId: oddBlock.id, address: "10.41.0.0" },
+    });
+    const singleAgain = await createAllocation(tx, {
+      customerId: customerB.id,
+      resourceType: "ipAddress",
+      resourceId: releasedIp.id,
+      allocatedAt: "2026-11-03",
+    });
+    await expectCode("IP_RANGE_HAS_ALLOCATED_ADDRESS", () =>
+      createAllocation(tx, {
+        customerId: customerB.id,
+        resourceType: "ipRange",
+        resourceId: oddBlock.id,
+        ipList: "10.41.0.0-10.41.0.1",
+        allocatedAt: "2026-11-03",
+      }),
+    );
+    await releaseAllocation(tx, singleAgain.allocation.id, "2026-11-04");
+
+    const rest = await releaseAllocation(tx, setAllocation.allocation.id, {
+      ipList: "10.41.0.4-10.41.0.6",
+      releasedAt: "2026-11-04",
+    });
+    assert(
+      rest.releasedCount === 3 &&
+        rest.remainingCount === 0 &&
+        rest.parentReleased,
+      "释放全部剩余 IP 后父分配应自动释放",
+    );
+    assert(
+      (await tx.resourceAllocation.findUniqueOrThrow({
+        where: { id: setAllocation.allocation.id },
+      })).releasedAt !== null,
+      "父分配应写入释放时间",
+    );
+    assert(
+      (await tx.ipAddress.count({
+        where: { blockId: oddBlock.id, customerId: { not: null } },
+      })) === 0,
+      "全部释放后地址客户缓存应清空",
+    );
+  });
+  console.log("PASS 任意 IP 集合分配、部分释放、释放记录与再分配");
+
+  // 15. 机柜任意 U 集合分配、部分释放、可用区间与再分配。
+  const uListRack = await prisma.rack.create({
+    data: { code: "RACK-ULIST", uStart: 1, uEnd: 12 },
+  });
+  await prisma.$transaction(async (tx) => {
+    const freeText = (ranges?: Array<{ start: number; end: number }>) =>
+      (ranges ?? []).map((range) => `${range.start}-${range.end}`).join(",");
+
+    const setAllocation = await createAllocation(tx, {
+      customerId: customerA.id,
+      resourceType: "rack",
+      resourceId: uListRack.id,
+      uList: "1, 3, 5-6",
+      allocatedAt: "2026-11-01",
+    });
+    assert(
+      setAllocation.allocation.uStart === 1 &&
+        setAllocation.allocation.uEnd === 6,
+      "非连续 U 集合应记录最小/最大 U 位",
+    );
+    const items = await tx.rackAllocationItem.findMany({
+      where: { allocationId: setAllocation.allocation.id },
+      orderBy: { uNumber: "asc" },
+    });
+    assert(
+      items.map((item) => item.uNumber).join(",") === "1,3,5,6",
+      "非连续 U 集合应生成 1,3,5,6 四条明细",
+    );
+    const beforeCounts = await loadRackAllocationCounts(tx, [
+      setAllocation.allocation.id,
+    ]);
+    assert(
+      beforeCounts.get(setAllocation.allocation.id)?.total === 4 &&
+        beforeCounts.get(setAllocation.allocation.id)?.active === 4,
+      "列表统计应显示 4 个 U 位",
+    );
+
+    await expectCode("RACK_RANGE_OVERLAP", () =>
+      createAllocation(tx, {
+        customerId: customerB.id,
+        resourceType: "rack",
+        resourceId: uListRack.id,
+        uList: "6-7",
+        allocatedAt: "2026-11-01",
+      }),
+    );
+    await expectCode("RACK_RANGE_OVERLAP", () =>
+      createAllocation(tx, {
+        customerId: customerB.id,
+        resourceType: "rack",
+        resourceId: uListRack.id,
+        uStart: 2,
+        uEnd: 3,
+        allocatedAt: "2026-11-01",
+      }),
+    );
+    await expectCode("RACK_RANGE_OUT_OF_BOUNDS", () =>
+      createAllocation(tx, {
+        customerId: customerB.id,
+        resourceType: "rack",
+        resourceId: uListRack.id,
+        uList: "12-13",
+        allocatedAt: "2026-11-01",
+      }),
+    );
+
+    const availableBefore = (
+      await listAvailableResources(tx, "rack", "RACK-ULIST")
+    ).find((row) => row.id === uListRack.id);
+    assert(availableBefore, "应能查询到机柜可用情况");
+    assert(
+      freeText(availableBefore.freeRanges) === "2-2,4-4,7-12",
+      `非连续占用后空闲区间应为 2,4,7-12，实际 ${freeText(availableBefore.freeRanges)}`,
+    );
+
+    const partial = await releaseAllocation(tx, setAllocation.allocation.id, {
+      uList: "1,5",
+      releasedAt: "2026-11-03",
+      releaseNote: "释放 U1 与 U5",
+      releasedByName: "测试员",
+    });
+    assert(
+      partial.releasedCount === 2 &&
+        partial.remainingCount === 2 &&
+        !partial.parentReleased,
+      "部分释放应保留父分配和 2 个有效 U 位",
+    );
+    const releasedItems = await tx.rackAllocationItem.findMany({
+      where: {
+        allocationId: setAllocation.allocation.id,
+        releasedAt: { not: null },
+      },
+      select: {
+        releaseBatchId: true,
+        releasedByName: true,
+        releaseNote: true,
+      },
+    });
+    assert(releasedItems.length === 2, "应产生 2 条 U 位释放记录");
+    assert(
+      releasedItems.every(
+        (item) =>
+          item.releaseBatchId === partial.releaseBatchId &&
+          item.releasedByName === "测试员" &&
+          item.releaseNote === "释放 U1 与 U5",
+      ),
+      "同一次部分释放应共用批次号并保存操作人与备注",
+    );
+
+    const availableAfter = (
+      await listAvailableResources(tx, "rack", "RACK-ULIST")
+    ).find((row) => row.id === uListRack.id);
+    assert(availableAfter, "部分释放后应能查询到机柜可用情况");
+    assert(
+      freeText(availableAfter.freeRanges) === "1-2,4-5,7-12",
+      `部分释放后空闲区间应由有效明细重新计算，实际 ${freeText(availableAfter.freeRanges)}`,
+    );
+    const afterCounts = await loadRackAllocationCounts(tx, [
+      setAllocation.allocation.id,
+    ]);
+    assert(
+      afterCounts.get(setAllocation.allocation.id)?.active === 2,
+      "部分释放后列表统计应剩余 2 个 U 位",
+    );
+
+    await expectCode("UNIT_NOT_IN_ALLOCATION", () =>
+      releaseAllocation(tx, setAllocation.allocation.id, {
+        uList: "7",
+        releasedAt: "2026-11-04",
+      }),
+    );
+    await expectCode("UNIT_ALREADY_RELEASED", () =>
+      releaseAllocation(tx, setAllocation.allocation.id, {
+        uList: "1",
+        releasedAt: "2026-11-04",
+      }),
+    );
+
+    // 已释放的 U1 可重新分配给其他客户。
+    const realloc = await createAllocation(tx, {
+      customerId: customerB.id,
+      resourceType: "rack",
+      resourceId: uListRack.id,
+      uList: "1",
+      allocatedAt: "2026-11-03",
+    });
+    const rest = await releaseAllocation(tx, setAllocation.allocation.id, {
+      uList: "3,6",
+      releasedAt: "2026-11-04",
+    });
+    assert(
+      rest.releasedCount === 2 &&
+        rest.remainingCount === 0 &&
+        rest.parentReleased,
+      "释放全部剩余 U 位后父分配应自动释放",
+    );
+    assert(
+      (await tx.resourceAllocation.findUniqueOrThrow({
+        where: { id: setAllocation.allocation.id },
+      })).releasedAt !== null,
+      "父分配应写入释放时间",
+    );
+    assert(
+      (await tx.rack.findUniqueOrThrow({ where: { id: uListRack.id } }))
+        .customerId === customerB.id,
+      "仅剩一个客户的有效分配时应回填客户缓存",
+    );
+
+    const releasedWhole = await releaseAllocation(tx, realloc.allocation.id, {
+      releasedAt: "2026-11-05",
+    });
+    assert(
+      releasedWhole.releasedCount === 1 && releasedWhole.parentReleased,
+      "整条释放应释放剩余 U 位",
+    );
+    assert(
+      (await tx.rack.findUniqueOrThrow({ where: { id: uListRack.id } }))
+        .customerId === null,
+      "全部释放后机柜客户缓存应清空",
+    );
+  });
+  console.log("PASS 机柜任意 U 集合分配、部分释放、可用区间与再分配");
+
+  // 16. 批量释放多条分配共用批次号，且校验失败不留下半释放状态。
+  const batchReleaseRack = await prisma.rack.create({
+    data: { code: "RACK-BATCH-REL", uStart: 1, uEnd: 8 },
+  });
+  await prisma.$transaction(async (tx) => {
+    const first = await createAllocation(tx, {
+      customerId: customerA.id,
+      resourceType: "rack",
+      resourceId: batchReleaseRack.id,
+      uList: "1-2",
+      allocatedAt: "2026-11-01",
+    });
+    const second = await createAllocation(tx, {
+      customerId: customerB.id,
+      resourceType: "rack",
+      resourceId: batchReleaseRack.id,
+      uList: "3-4",
+      allocatedAt: "2026-11-01",
+    });
+    const third = await createAllocation(tx, {
+      customerId: customerA.id,
+      resourceType: "rack",
+      resourceId: batchReleaseRack.id,
+      uList: "5",
+      allocatedAt: "2026-11-01",
+    });
+
+    const batch = await releaseAllocations(tx, {
+      ids: [first.allocation.id, second.allocation.id],
+      releasedAt: "2026-11-05",
+      releaseNote: "批量释放整条分配",
+      releasedByName: "批量操作员",
+    });
+    assert(
+      batch.released === 2 && batch.totalUnits === 4,
+      "应批量释放 2 条共 4 个 U 位",
+    );
+    const batchItems = await tx.rackAllocationItem.findMany({
+      where: {
+        allocationId: { in: [first.allocation.id, second.allocation.id] },
+        releasedAt: { not: null },
+      },
+      select: {
+        releaseBatchId: true,
+        releaseNote: true,
+        releasedByName: true,
+      },
+    });
+    assert(
+      batchItems.length === 4 &&
+        batchItems.every(
+          (item) =>
+            item.releaseBatchId === batch.releaseBatchId &&
+            item.releaseNote === "批量释放整条分配" &&
+            item.releasedByName === "批量操作员",
+        ),
+      "批量释放应共用批次号并保存备注与操作人",
+    );
+
+    await expectCode("ALREADY_RELEASED", () =>
+      releaseAllocations(tx, {
+        ids: [first.allocation.id, third.allocation.id],
+        releasedAt: "2026-11-05",
+      }),
+    );
+    assert(
+      (await tx.resourceAllocation.findUniqueOrThrow({
+        where: { id: third.allocation.id },
+      })).releasedAt === null,
+      "批量释放校验失败时不应留下部分释放",
+    );
+
+    const single = await releaseAllocations(tx, {
+      ids: [third.allocation.id],
+      releasedAt: "2026-11-05",
+    });
+    assert(
+      single.released === 1 && single.totalUnits === 1,
+      "单条批量释放应释放剩余 U 位",
+    );
+    assert(
+      (await tx.rack.findUniqueOrThrow({ where: { id: batchReleaseRack.id } }))
+        .customerId === null,
+      "批量释放后机柜客户缓存应清空",
+    );
+  });
+  console.log("PASS 批量释放多条分配共用批次号与失败回滚");
 
   console.log(`\n全部业务规则测试通过（供应商 ${supplier.name}，机柜 ${rangeRack.code} 等）。`);
 }

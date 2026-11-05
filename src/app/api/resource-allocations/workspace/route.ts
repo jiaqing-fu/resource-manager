@@ -11,6 +11,8 @@ import { allocationDisplayName } from "@/lib/allocation-display";
 import {
   ALLOCATION_RESOURCE_TYPES,
   listAvailableResources,
+  loadIpAllocationCounts,
+  loadRackAllocationCounts,
   type AllocationResourceType,
 } from "@/server/services/allocations";
 
@@ -60,13 +62,41 @@ export async function GET(req: NextRequest) {
       AllocationResourceType,
       Awaited<ReturnType<typeof listAvailableResources>>
     >;
+    const [ipCounts, rackCounts] = await Promise.all([
+      loadIpAllocationCounts(
+        prisma,
+        allocations
+          .filter((row) => row.resourceType === "ipRange")
+          .map((row) => row.id),
+      ),
+      loadRackAllocationCounts(
+        prisma,
+        allocations
+          .filter((row) => row.resourceType === "rack")
+          .map((row) => row.id),
+      ),
+    ]);
 
     return jsonOk({
       customerId,
-      allocations: allocations.map((row) => ({
-        ...row,
-        currentResourceName: allocationDisplayName(row),
-      })),
+      allocations: allocations.map((row) => {
+        const ipCount = ipCounts.get(row.id);
+        const rackCount = rackCounts.get(row.id);
+        return {
+          ...row,
+          ipItemCount: ipCount?.total ?? 0,
+          ipActiveCount: ipCount?.active ?? 0,
+          rackItemCount: rackCount?.total ?? 0,
+          rackActiveCount: rackCount?.active ?? 0,
+          currentResourceName: allocationDisplayName({
+            ...row,
+            ipItemCount: ipCount?.total ?? 0,
+            ipActiveCount: ipCount?.active ?? 0,
+            rackItemCount: rackCount?.total ?? 0,
+            rackActiveCount: rackCount?.active ?? 0,
+          }),
+        };
+      }),
       resources,
     });
   } catch (error) {

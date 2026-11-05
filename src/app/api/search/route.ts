@@ -9,10 +9,28 @@ import {
   NOTIFICATION_STATUS,
   PARTY_LEVELS,
 } from "@/lib/enums";
+import { ipInBlock, parseIp, parseStoredBlock } from "@/lib/ip";
 
 export const dynamic = "force-dynamic";
 
 type Item = { id: string; title: string; subtitle: string; href: string };
+
+type BlockRow = {
+  id: string;
+  cidr: string;
+  status: string;
+  kind: string;
+  rangeStart: string | null;
+  rangeEnd: string | null;
+};
+
+type AllocationRow = {
+  id: string;
+  resourceType: string;
+  resourceName: string;
+  releasedAt: Date | null;
+  customer: { name: string };
+};
 
 export async function GET(req: NextRequest) {
   try {
@@ -22,6 +40,36 @@ export async function GET(req: NextRequest) {
       return jsonOk({ q, groups: [] });
     }
     const take = 8;
+    const ip = parseIp(q);
+    // IP 搜索额外按覆盖范围匹配：命中包含该地址的 IP 段/区间与区间分配。
+    const containingBlocksPromise: Promise<BlockRow[]> = ip
+      ? prisma.ipBlock.findMany({
+          select: {
+            id: true,
+            cidr: true,
+            status: true,
+            kind: true,
+            rangeStart: true,
+            rangeEnd: true,
+          },
+        })
+      : Promise.resolve([]);
+    const containingAllocationsPromise: Promise<AllocationRow[]> = ip
+      ? prisma.resourceAllocation.findMany({
+          where: {
+            resourceType: "ipRange",
+            items: { some: { address: ip.canonical } },
+          },
+          orderBy: [{ allocatedAt: "desc" }],
+          select: {
+            id: true,
+            resourceType: true,
+            resourceName: true,
+            releasedAt: true,
+            customer: { select: { name: true } },
+          },
+        })
+      : Promise.resolve([]);
     const [
       suppliers,
       customers,
@@ -36,6 +84,8 @@ export async function GET(req: NextRequest) {
       racks,
       allocations,
       notifications,
+      containingBlocks,
+      containingAllocations,
     ] = await Promise.all([
       prisma.supplier.findMany({
         where: { name: { contains: q } },
@@ -148,7 +198,52 @@ export async function GET(req: NextRequest) {
         take,
         select: { id: true, title: true, recipient: true, subject: true, status: true },
       }),
+      containingBlocksPromise,
+      containingAllocationsPromise,
     ]);
+
+    // 覆盖匹配结果优先展示；同一记录被文本匹配和覆盖匹配同时命中时只保留一条。
+    const blockById = new Map<string, { id: string; cidr: string; status: string }>();
+    if (ip) {
+      containingBlocks
+        .map((row) => ({ row, spec: parseStoredBlock(row) }))
+        .filter(
+          (entry) =>
+            entry.spec !== null &&
+            entry.spec.version === ip.version &&
+            ipInBlock(ip.canonical, entry.spec),
+        )
+        .sort((a, b) => {
+          const sa = a.spec!;
+          const sb = b.spec!;
+          if (sa.version === 4 && sb.version === 4) {
+            return (sa.size ?? 0) - (sb.size ?? 0);
+          }
+          return (sb.prefix ?? 0) - (sa.prefix ?? 0);
+        })
+        .slice(0, take)
+        .forEach(({ row }) => blockById.set(row.id, row));
+    }
+    for (const row of blocks) {
+      if (!blockById.has(row.id)) blockById.set(row.id, row);
+    }
+    const mergedBlocks = Array.from(blockById.values()).slice(0, take);
+
+    const allocationById = new Map<
+      string,
+      AllocationRow & { matchedIp?: boolean }
+    >();
+    if (ip) {
+      for (const row of containingAllocations) {
+        allocationById.set(row.id, { ...row, matchedIp: true });
+      }
+    }
+    for (const row of allocations) {
+      if (!allocationById.has(row.id)) allocationById.set(row.id, row);
+    }
+    const mergedAllocations = Array.from(allocationById.values())
+      .sort((a, b) => Number(Boolean(a.releasedAt)) - Number(Boolean(b.releasedAt)))
+      .slice(0, take);
 
     const groups: Array<{ key: string; label: string; items: Item[] }> = [
       {
@@ -184,7 +279,7 @@ export async function GET(req: NextRequest) {
       {
         key: "ipBlocks",
         label: "IP 段",
-        items: blocks.map((b) => ({
+        items: mergedBlocks.map((b) => ({
           id: b.id,
           title: b.cidr,
           subtitle: "IP 段",
@@ -256,13 +351,13 @@ export async function GET(req: NextRequest) {
       {
         key: "allocations",
         label: "资源分配",
-        items: allocations.map((a) => ({
+        items: mergedAllocations.map((a) => ({
           id: a.id,
           title: a.resourceName,
           subtitle: `${a.customer.name} / ${labelOf(ALLOCATION_RESOURCE_TYPES, a.resourceType)}${
-            a.releasedAt ? "（已释放）" : ""
-          }`,
-          href: `/resource-allocations?keyword=${encodeURIComponent(a.resourceName)}`,
+            a.matchedIp && ip ? ` / 包含 ${ip.canonical}` : ""
+          }${a.releasedAt ? "（已释放）" : ""}`,
+          href: `/resource-allocations?keyword=${encodeURIComponent(q)}`,
         })),
       },
       {

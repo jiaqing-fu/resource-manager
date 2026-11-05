@@ -372,6 +372,111 @@ export function ipInBlock(ip: string, block: ParsedBlock): boolean {
   return ipInCidr(parsed.canonical, block.canonical);
 }
 
+export type ParsedIpv4List = {
+  addresses: string[];
+  startLong: number;
+  endLong: number;
+  /** 地址集合是否恰好构成一个连续闭区间。 */
+  contiguous: boolean;
+};
+
+/**
+ * 解析“IP / 区间”列表，支持逗号、空白、分号、换行分隔。
+ * 仅支持 IPv4；自动去重、排序，单个列表最多 max 个地址。
+ */
+export function parseIpv4ListInput(
+  input: string,
+  max = MAX_RANGE_ALLOCATION_ADDRESSES,
+):
+  | { ok: true; value: ParsedIpv4List }
+  | { ok: false; error: string } {
+  const normalized = (input ?? "").trim();
+  if (!normalized) {
+    return { ok: false, error: "请输入 IP 或区间列表" };
+  }
+  const tokens = normalized
+    .replace(/\s*-\s*/g, "-")
+    .split(/[\s,，;；、]+/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+  if (tokens.length === 0) {
+    return { ok: false, error: "请输入 IP 或区间列表" };
+  }
+
+  const seen = new Set<string>();
+  const longs: number[] = [];
+  for (const token of tokens) {
+    if (token.includes("-")) {
+      const range = parseIpRange(token);
+      if (
+        !range ||
+        range.version !== 4 ||
+        range.startLong === null ||
+        range.endLong === null
+      ) {
+        return {
+          ok: false,
+          error: `区间 ${token} 格式不正确，仅支持 IPv4 起止地址`,
+        };
+      }
+      const size = range.endLong - range.startLong + 1;
+      if (size > max) {
+        return { ok: false, error: `单个区间最多 ${max} 个地址` };
+      }
+      for (let n = range.startLong; n <= range.endLong; n += 1) {
+        const address = ipv4LongToIp(n);
+        if (seen.has(address)) continue;
+        seen.add(address);
+        longs.push(n);
+        if (longs.length > max) {
+          return { ok: false, error: `单次最多 ${max} 个地址` };
+        }
+      }
+      continue;
+    }
+
+    const ip = parseIp(token);
+    if (!ip || ip.version !== 4) {
+      return {
+        ok: false,
+        error: `IP 地址 ${token} 格式不正确，仅支持 IPv4`,
+      };
+    }
+    if (seen.has(ip.canonical)) continue;
+    const n = ipv4ToLong(ip.canonical);
+    if (n === null) {
+      return { ok: false, error: `IP 地址 ${token} 格式不正确` };
+    }
+    seen.add(ip.canonical);
+    longs.push(n);
+    if (longs.length > max) {
+      return { ok: false, error: `单次最多 ${max} 个地址` };
+    }
+  }
+
+  longs.sort((a, b) => a - b);
+  const startLong = longs[0];
+  const endLong = longs[longs.length - 1];
+  return {
+    ok: true,
+    value: {
+      addresses: longs.map((n) => ipv4LongToIp(n)),
+      startLong,
+      endLong,
+      contiguous: longs.length === endLong - startLong + 1,
+    },
+  };
+}
+
+/** 地址是否落在 IPv4 闭区间 [startIp, endIp] 内；非 IPv4 输入返回 false。 */
+export function ipInIpv4Range(address: string, startIp: string, endIp: string): boolean {
+  const n = ipv4ToLong(address);
+  if (n === null) return false;
+  const start = ipv4ToLong(startIp);
+  const end = ipv4ToLong(endIp);
+  return start !== null && end !== null && n >= start && n <= end;
+}
+
 /** parent 的覆盖范围是否完整包含 child（允许等覆盖，调用方按需拒绝相等）。 */
 export function blockContainsBlock(parent: ParsedBlock, child: ParsedBlock): boolean {
   if (parent.version !== child.version) return false;

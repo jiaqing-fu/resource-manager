@@ -402,6 +402,10 @@ export type ResourceAllocation = {
   uEnd: number | null;
   ipRangeStart: string | null;
   ipRangeEnd: string | null;
+  ipItemCount?: number;
+  ipActiveCount?: number;
+  rackItemCount?: number;
+  rackActiveCount?: number;
   allocatedMbps: number | null;
   activeKey: string | null;
   rackId: string | null;
@@ -437,6 +441,68 @@ export type ResourceAllocation = {
   device?: { id: string; name: string } | null;
   createdAt: string;
   updatedAt: string;
+};
+
+/** IP 分配明细：每个 IP 一条，是占用与释放记录的权威来源。 */
+export type ResourceAllocationItem = {
+  id: string;
+  allocationId: string;
+  ipAddressId: string | null;
+  address: string;
+  releasedAt: string | null;
+  releaseBatchId: string | null;
+  releaseNote: string | null;
+  releasedByName: string | null;
+  createdAt: string;
+  updatedAt: string;
+  ipAddress?: {
+    id: string;
+    address: string;
+    dnsName?: string | null;
+    status?: string | null;
+  } | null;
+};
+
+export type IpReleaseRecord = {
+  id: string;
+  address: string;
+  releasedAt: string;
+  releaseBatchId: string | null;
+  releaseNote: string | null;
+  releasedByName: string | null;
+  allocation: {
+    id: string;
+    resourceName: string;
+    customer: { id: string; name: string } | null;
+  };
+};
+
+/** 机柜分配明细：每个 U 位一条，是占用与释放记录的权威来源。 */
+export type RackAllocationItem = {
+  id: string;
+  allocationId: string;
+  rackId: string;
+  uNumber: number;
+  releasedAt: string | null;
+  releaseBatchId: string | null;
+  releaseNote: string | null;
+  releasedByName: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type RackReleaseRecord = {
+  id: string;
+  uNumber: number;
+  releasedAt: string;
+  releaseBatchId: string | null;
+  releaseNote: string | null;
+  releasedByName: string | null;
+  allocation: {
+    id: string;
+    resourceName: string;
+    customer: { id: string; name: string } | null;
+  };
 };
 
 export type SystemEndpoint = {

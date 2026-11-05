@@ -77,7 +77,12 @@ export async function PATCH(req: NextRequest, { params }: Params) {
           },
           allocations: {
             where: { releasedAt: null },
-            select: { id: true, uStart: true, uEnd: true },
+            select: {
+              id: true,
+              uStart: true,
+              uEnd: true,
+              _count: { select: { rackItems: true } },
+            },
           },
         },
       });
@@ -101,8 +106,31 @@ export async function PATCH(req: NextRequest, { params }: Params) {
         );
       }
 
+      // 以有效 U 位明细为准；父区间在部分释放后可能仍包含已释放的 U 位。
+      const outOfRangeItem = await tx.rackAllocationItem.findFirst({
+        where: {
+          rackId: id,
+          releasedAt: null,
+          OR: [{ uNumber: { lt: uStart } }, { uNumber: { gt: uEnd } }],
+        },
+        orderBy: { uNumber: "asc" },
+        select: {
+          uNumber: true,
+          allocation: { select: { resourceName: true } },
+        },
+      });
+      if (outOfRangeItem) {
+        throw new ApiError(
+          422,
+          `有效分配「${outOfRangeItem.allocation.resourceName}」占用 U${outOfRangeItem.uNumber}，超出新机柜区间 ${rackRangeText(uStart, uEnd)}，请先释放或调整该分配`,
+          "ALLOCATION_OUT_OF_RANGE",
+        );
+      }
+
+      // 兼容尚未回填明细的历史分配：按父区间校验。
       const rangeChanged = uStart !== existing.uStart || uEnd !== existing.uEnd;
       const allocationOut = existing.allocations.find((allocation) => {
+        if (allocation._count.rackItems > 0) return false;
         if (allocation.uStart === null || allocation.uEnd === null) {
           return rangeChanged;
         }

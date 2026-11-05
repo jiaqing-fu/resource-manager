@@ -13,7 +13,7 @@ import {
 } from "@/lib/api";
 import { IP_BLOCK_ROLES, IP_BLOCK_STATUS } from "@/lib/enums";
 import { ipBlockSchema } from "@/lib/ip-block-schema";
-import { parseStoredBlock, usableCount } from "@/lib/ip";
+import { ipInBlock, parseIp, parseStoredBlock, usableCount } from "@/lib/ip";
 import {
   recomputeBlockParents,
   syncRangeAddresses,
@@ -43,6 +43,28 @@ export async function GET(req: NextRequest) {
         { vlan: { is: { name: { contains: kw } } } },
       ];
       if (/^\d+$/.test(kw)) or.push({ vlan: { is: { vid: Number(kw) } } });
+      // 输入 IP 时，同时匹配覆盖该地址的 IP 段/区间。
+      const ip = parseIp(kw);
+      if (ip) {
+        const candidates = await prisma.ipBlock.findMany({
+          select: {
+            id: true,
+            cidr: true,
+            kind: true,
+            rangeStart: true,
+            rangeEnd: true,
+          },
+        });
+        const ids = candidates
+          .filter((row) => {
+            const spec = parseStoredBlock(row);
+            return Boolean(
+              spec && spec.version === ip.version && ipInBlock(ip.canonical, spec),
+            );
+          })
+          .map((row) => row.id);
+        if (ids.length > 0) or.push({ id: { in: ids } });
+      }
       where.OR = or;
     }
     const status = queryValue(req, "status");

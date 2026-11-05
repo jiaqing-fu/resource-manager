@@ -5,7 +5,6 @@ import {
   blockOverlapsBlock,
   ipInBlock,
   ipv4LongToIp,
-  ipv4ToLong,
   ipv4UsableCount,
   listIpv4Hosts,
   MAX_RANGE_ADDRESSES,
@@ -259,23 +258,20 @@ export async function validateBlockInput(
         );
       }
 
-      const allocations = await tx.resourceAllocation.findMany({
-        where: { resourceType: "ipRange", ipBlockId: id, releasedAt: null },
-        select: { ipRangeStart: true, ipRangeEnd: true },
+      const allocatedItems = await tx.resourceAllocationItem.findMany({
+        where: {
+          releasedAt: null,
+          allocation: { resourceType: "ipRange", ipBlockId: id, releasedAt: null },
+        },
+        select: { address: true },
       });
-      for (const allocation of allocations) {
-        const range =
-          allocation.ipRangeStart && allocation.ipRangeEnd
-            ? parseIpRange(`${allocation.ipRangeStart}-${allocation.ipRangeEnd}`)
-            : null;
-        const rangeSpec = range ? rangeToBlock(range) : null;
-        if (!rangeSpec || !blockContainsBlock(spec, rangeSpec)) {
-          throw new ApiError(
-            409,
-            "新范围不包含该段上的有效 IP 区间分配，请先释放相关分配",
-            "ALLOCATIONS_OUTSIDE_BLOCK",
-          );
-        }
+      const outsideItem = allocatedItems.find((item) => !ipInBlock(item.address, spec));
+      if (outsideItem) {
+        throw new ApiError(
+          409,
+          `新范围不包含有效分配中的 IP ${outsideItem.address}，请先释放相关分配`,
+          "ALLOCATIONS_OUTSIDE_BLOCK",
+        );
       }
     }
   }
@@ -397,21 +393,15 @@ export async function deleteBlockCascade(
     });
     if (allocatedCount > 0) reasons.push(`${allocatedCount} 个有效单 IP 分配`);
 
-    const activeRanges = await tx.resourceAllocation.findMany({
-      where: { resourceType: "ipRange", releasedAt: null },
-      select: { ipRangeStart: true, ipRangeEnd: true },
+    const activeItemCount = await tx.resourceAllocationItem.count({
+      where: {
+        releasedAt: null,
+        allocation: { resourceType: "ipRange", ipBlockId: id, releasedAt: null },
+      },
     });
-    const intervals = activeRanges.flatMap((row) => {
-      if (!row.ipRangeStart || !row.ipRangeEnd) return [];
-      const range = parseIpRange(`${row.ipRangeStart}-${row.ipRangeEnd}`);
-      if (!range || range.startLong === null || range.endLong === null) return [];
-      return [{ start: range.startLong, end: range.endLong }];
-    });
-    const covered = ips.find((ip) => {
-      const n = ipv4ToLong(ip.address);
-      return n !== null && intervals.some((r) => n >= r.start && n <= r.end);
-    });
-    if (covered) reasons.push(`IP ${covered.address} 被有效区间分配覆盖`);
+    if (activeItemCount > 0) {
+      reasons.push(`${activeItemCount} 个 IP 仍在有效分配中`);
+    }
 
     if (reasons.length > 0) {
       throw new ApiError(
@@ -792,42 +782,21 @@ export async function generateAddresses(
 }
 
 /**
- * 重算一段 IPv4 地址的客户缓存。
- * 单 IP 有效分配优先，其次有效区间分配；都没有则清空。
+ * 重算一批 IPv4 地址的客户缓存。
+ * 单 IP 有效分配优先，其次是 IP 分配明细（区间/集合分配）；都没有则清空。
  */
-export async function recomputeIpCustomersForSpan(
+export async function recomputeIpCustomersForAddresses(
   tx: Tx,
-  startIp: string,
-  endIp: string,
+  addresses: string[],
 ): Promise<void> {
-  const span = spanFromIps(startIp, endIp);
-  if (!span || span.startLong === null || span.endLong === null) return;
-
-  const activeRanges = await tx.resourceAllocation.findMany({
-    where: { resourceType: "ipRange", releasedAt: null },
-    select: {
-      customerId: true,
-      ipRangeStart: true,
-      ipRangeEnd: true,
-    },
-  });
-  const intervals = activeRanges.flatMap((row) => {
-    if (!row.ipRangeStart || !row.ipRangeEnd) return [];
-    const range = parseIpRange(`${row.ipRangeStart}-${row.ipRangeEnd}`);
-    if (
-      !range ||
-      range.version !== 4 ||
-      range.startLong === null ||
-      range.endLong === null
-    ) {
-      return [];
-    }
-    if (range.startLong > span.endLong! || range.endLong < span.startLong!) return [];
-    return [{ start: range.startLong, end: range.endLong, customerId: row.customerId }];
-  });
-
-  const addresses = addressList(span.startLong, span.endLong);
-  for (const chunk of chunkArray(addresses)) {
+  const canonical = Array.from(
+    new Set(
+      addresses
+        .map((address) => parseIp(address)?.canonical)
+        .filter((address): address is string => Boolean(address)),
+    ),
+  );
+  for (const chunk of chunkArray(canonical)) {
     const ips = await tx.ipAddress.findMany({
       where: { address: { in: chunk } },
       select: { id: true, address: true, customerId: true },
@@ -847,19 +816,32 @@ export async function recomputeIpCustomersForSpan(
       if (row.ipAddressId) individualByIp.set(row.ipAddressId, row.customerId);
     }
 
+    const items = await tx.resourceAllocationItem.findMany({
+      where: {
+        releasedAt: null,
+        address: { in: ips.map((ip) => ip.address) },
+        allocation: { releasedAt: null },
+      },
+      select: {
+        address: true,
+        allocation: { select: { customerId: true } },
+      },
+    });
+    const itemCustomerByAddress = new Map<string, string>();
+    for (const item of items) {
+      itemCustomerByAddress.set(item.address, item.allocation.customerId);
+    }
+
     const changes = new Map<string | null, string[]>();
     for (const ip of ips) {
-      const n = ipv4ToLong(ip.address);
       const desired =
         individualByIp.get(ip.id) ??
-        (n === null
-          ? null
-          : (intervals.find((r) => n >= r.start && n <= r.end)?.customerId ?? null));
+        itemCustomerByAddress.get(ip.address) ??
+        null;
       if (desired === ip.customerId) continue;
-      const key = desired ?? null;
-      const ids = changes.get(key) ?? [];
+      const ids = changes.get(desired) ?? [];
       ids.push(ip.id);
-      changes.set(key, ids);
+      changes.set(desired, ids);
     }
 
     for (const [customerId, ids] of changes) {
@@ -871,6 +853,20 @@ export async function recomputeIpCustomersForSpan(
       }
     }
   }
+}
+
+/** 重算一段 IPv4 地址的客户缓存。 */
+export async function recomputeIpCustomersForSpan(
+  tx: Tx,
+  startIp: string,
+  endIp: string,
+): Promise<void> {
+  const span = spanFromIps(startIp, endIp);
+  if (!span || span.startLong === null || span.endLong === null) return;
+  await recomputeIpCustomersForAddresses(
+    tx,
+    addressList(span.startLong, span.endLong),
+  );
 }
 
 async function reparentAddressesToBlock(
@@ -1058,38 +1054,125 @@ export async function ensureAddressesInSpan(
   return { created: missing.length, reused: existingRows.length };
 }
 
-/** 地址是否处于有效区间分配内；是则抛出 409。 */
+/**
+ * 确保一组任意 IPv4 地址都存在 IpAddress 记录，并归属到指定段。
+ * 用于“按 IP/区间列表”分配；返回 address -> IpAddress.id。
+ */
+export async function ensureAddressesForList(
+  tx: Tx,
+  block: RangeBlockRef,
+  addresses: string[],
+): Promise<Map<string, string>> {
+  const blockSpec = parseStoredBlock(block);
+  if (!blockSpec || blockSpec.version !== 4) {
+    throw new ApiError(422, "IP 段的覆盖范围无效", "INVALID_BLOCK_RANGE");
+  }
+  const canonical: string[] = [];
+  for (const address of addresses) {
+    const ip = parseIp(address);
+    if (!ip || ip.version !== 4) {
+      throw new ApiError(422, `IP 地址 ${address} 格式不正确`, "INVALID_IP");
+    }
+    if (!ipInBlock(ip.canonical, blockSpec)) {
+      throw new ApiError(
+        422,
+        `IP ${ip.canonical} 不属于 IP 段 ${block.cidr}`,
+        "IP_RANGE_OUTSIDE_BLOCK",
+      );
+    }
+    canonical.push(ip.canonical);
+  }
+  const unique = Array.from(new Set(canonical));
+
+  const existingRows: { id: string; address: string; blockId: string | null }[] = [];
+  for (const chunk of chunkArray(unique)) {
+    const rows = await tx.ipAddress.findMany({
+      where: { address: { in: chunk } },
+      select: { id: true, address: true, blockId: true },
+    });
+    existingRows.push(...rows);
+  }
+  const existing = new Map(existingRows.map((row) => [row.address, row]));
+
+  const others = await loadParsedBlocks(tx, block.id);
+  const otherById = new Map(others.map((row) => [row.id, row]));
+  const reparentIds: string[] = [];
+  for (const row of existingRows) {
+    if (row.blockId === block.id) continue;
+    if (!row.blockId) {
+      reparentIds.push(row.id);
+      continue;
+    }
+    const owner = otherById.get(row.blockId);
+    if (
+      owner &&
+      blockContainsBlock(owner.spec, blockSpec) &&
+      !sameCoverage(owner.spec, blockSpec)
+    ) {
+      reparentIds.push(row.id);
+      continue;
+    }
+    if (owner && blockContainsBlock(blockSpec, owner.spec)) {
+      throw new ApiError(
+        422,
+        `IP ${row.address} 属于子网段 ${owner.cidr}，请在子网段上分配`,
+        "IP_IN_CHILD_BLOCK",
+      );
+    }
+    throw new ApiError(
+      409,
+      `IP ${row.address} 当前归属网段与所选网段不一致`,
+      "IP_BLOCK_MISMATCH",
+    );
+  }
+  for (const chunk of chunkArray(reparentIds)) {
+    await tx.ipAddress.updateMany({
+      where: { id: { in: chunk } },
+      data: { blockId: block.id },
+    });
+  }
+
+  const missing = unique.filter((address) => !existing.has(address));
+  for (const chunk of chunkArray(missing)) {
+    await tx.ipAddress.createMany({
+      data: chunk.map((address) => ({
+        address,
+        blockId: block.id,
+        status: "active",
+        role: "other",
+        supplierId: block.supplierId,
+      })),
+    });
+  }
+
+  const result: { id: string; address: string }[] = [];
+  for (const chunk of chunkArray(unique)) {
+    const rows = await tx.ipAddress.findMany({
+      where: { address: { in: chunk } },
+      select: { id: true, address: true },
+    });
+    result.push(...rows);
+  }
+  return new Map(result.map((row) => [row.address, row.id]));
+}
+
+/** 地址是否处于有效 IP 分配明细中；是则抛出 409。 */
 export async function assertAddressNotInActiveIpRange(
   tx: Tx,
   address: string,
 ): Promise<void> {
   const ip = parseIp(address);
-  const n = ipv4ToLong(address);
-  if (!ip || ip.version !== 4 || n === null) return;
-  const rows = await tx.resourceAllocation.findMany({
-    where: { resourceType: "ipRange", releasedAt: null },
+  if (!ip || ip.version !== 4) return;
+  const item = await tx.resourceAllocationItem.findFirst({
+    where: { releasedAt: null, address: ip.canonical },
     select: {
-      ipRangeStart: true,
-      ipRangeEnd: true,
-      customer: { select: { name: true } },
+      allocation: { select: { customer: { select: { name: true } } } },
     },
   });
-  for (const row of rows) {
-    if (!row.ipRangeStart || !row.ipRangeEnd) continue;
-    const range = parseIpRange(`${row.ipRangeStart}-${row.ipRangeEnd}`);
-    if (
-      !range ||
-      range.startLong === null ||
-      range.endLong === null ||
-      n < range.startLong ||
-      n > range.endLong
-    ) {
-      continue;
-    }
-    throw new ApiError(
-      409,
-      `IP ${ip.canonical} 属于有效区间分配（客户 ${row.customer.name}），不能修改或删除`,
-      "IP_IN_ALLOCATED_RANGE",
-    );
-  }
+  if (!item) return;
+  throw new ApiError(
+    409,
+    `IP ${ip.canonical} 属于有效 IP 分配（客户 ${item.allocation.customer.name}），不能修改或删除`,
+    "IP_IN_ALLOCATED_RANGE",
+  );
 }
