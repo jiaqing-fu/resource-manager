@@ -38,6 +38,7 @@ import {
 import type {
   IpReleaseRecord,
   ListResult,
+  OtherReleaseRecord,
   RackAllocationItem,
   RackReleaseRecord,
   ResourceAllocation,
@@ -398,13 +399,16 @@ export default function ResourceAllocationsPage() {
     releasedAt?: Dayjs | null;
     releaseNote?: string;
   }>();
-  const [recordKind, setRecordKind] = useState<"ip" | "rack">("ip");
+  const [recordKind, setRecordKind] = useState<"ip" | "rack" | "other">("ip");
   const [recordsKeyword, setRecordsKeyword] = useState("");
   const [recordsCustomerId, setRecordsCustomerId] = useState<string | undefined>();
   const [recordsPage, setRecordsPage] = useState(1);
   const [recordsPageSize, setRecordsPageSize] = useState(20);
 
-  type ReleaseRecordRow = IpReleaseRecord | RackReleaseRecord;
+  type ReleaseRecordRow =
+    | IpReleaseRecord
+    | RackReleaseRecord
+    | OtherReleaseRecord;
 
   const {
     data: records,
@@ -414,7 +418,11 @@ export default function ResourceAllocationsPage() {
   } = useSWR<ListResult<ReleaseRecordRow>>(
     activeTab === "records"
       ? `/api/resource-allocations/${
-          recordKind === "ip" ? "release-records" : "rack-release-records"
+          recordKind === "ip"
+            ? "release-records"
+            : recordKind === "rack"
+              ? "rack-release-records"
+              : "other-release-records"
         }${buildQuery({
           keyword: recordsKeyword,
           customerId: recordsCustomerId,
@@ -579,6 +587,12 @@ export default function ResourceAllocationsPage() {
     },
     { title: "备注", dataIndex: "notes", render: (v) => <Maybe value={v} /> },
     {
+      title: "释放备注",
+      width: 160,
+      render: (_v, row) =>
+        row.releasedAt ? <Maybe value={row.releaseNote} /> : "—",
+    },
+    {
       title: "操作",
       width: 120,
       fixed: "right",
@@ -607,10 +621,19 @@ export default function ResourceAllocationsPage() {
       render: (value: string) => dayjs(value).format("YYYY-MM-DD HH:mm"),
     },
     {
-      title: recordKind === "ip" ? "IP 地址" : "U 位",
+      title:
+        recordKind === "ip"
+          ? "IP 地址"
+          : recordKind === "rack"
+            ? "U 位"
+            : "资源类型",
       width: 140,
       render: (_v, row) =>
-        "address" in row ? row.address : `U${row.uNumber}`,
+        "address" in row
+          ? row.address
+          : "uNumber" in row
+            ? `U${row.uNumber}`
+            : labelOf(ALLOCATION_RESOURCE_TYPES, row.resourceType),
     },
     {
       title: "客户",
@@ -732,7 +755,7 @@ export default function ResourceAllocationsPage() {
                   loading={isLoading}
                   dataSource={data?.items ?? []}
                   columns={columns}
-                  scroll={{ x: 1400 }}
+                  scroll={{ x: 1560 }}
                   rowSelection={{
                     selectedRowKeys: selectedIds,
                     onChange: setSelectedIds,
@@ -788,6 +811,7 @@ export default function ResourceAllocationsPage() {
                       options={[
                         { label: "IP 记录", value: "ip" },
                         { label: "机柜 U 位记录", value: "rack" },
+                        { label: "其他资源", value: "other" },
                       ]}
                       onChange={(value) => {
                         setRecordKind(value as "ip" | "rack");
@@ -800,7 +824,9 @@ export default function ResourceAllocationsPage() {
                       placeholder={
                         recordKind === "ip"
                           ? "搜索 IP / 客户 / 分配记录 / 批次"
-                          : "搜索 U 位 / 客户 / 分配记录 / 批次"
+                          : recordKind === "rack"
+                            ? "搜索 U 位 / 客户 / 分配记录 / 批次"
+                            : "搜索资源 / 客户 / 分配记录 / 批次"
                       }
                       style={{ width: 280 }}
                       onSearch={(v) => {

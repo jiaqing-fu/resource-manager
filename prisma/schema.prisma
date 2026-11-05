@@ -465,6 +465,11 @@ model ResourceAllocation {
   releasedAt  DateTime?
   notes       String?
 
+  /** 整条释放时保存的备注、操作人与批次；区间类部分释放的明细记录在子表。 */
+  releaseNote    String?
+  releasedByName String?
+  releaseBatchId String?
+
   /** IP 区间/集合分配的实际占用单元；区间只是批量创建方式。 */
   items ResourceAllocationItem[]
 
@@ -477,6 +482,7 @@ model ResourceAllocation {
   @@index([customerId, allocatedAt])
   @@index([customerId, releasedAt])
   @@index([resourceType, releasedAt])
+  @@index([releaseBatchId])
   @@index([rackId])
   @@index([rackId, releasedAt])
   @@index([ipBlockId])

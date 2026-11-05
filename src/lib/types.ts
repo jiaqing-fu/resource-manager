@@ -419,6 +419,9 @@ export type ResourceAllocation = {
   allocatedAt: string;
   releasedAt: string | null;
   notes: string | null;
+  releaseNote?: string | null;
+  releasedByName?: string | null;
+  releaseBatchId?: string | null;
   rack?: {
     id: string;
     code: string;
@@ -494,6 +497,21 @@ export type RackAllocationItem = {
 export type RackReleaseRecord = {
   id: string;
   uNumber: number;
+  releasedAt: string;
+  releaseBatchId: string | null;
+  releaseNote: string | null;
+  releasedByName: string | null;
+  allocation: {
+    id: string;
+    resourceName: string;
+    customer: { id: string; name: string } | null;
+  };
+};
+
+/** 其他资源（非 IP 区间/机柜）的整条释放记录，直接来自分配记录。 */
+export type OtherReleaseRecord = {
+  id: string;
+  resourceType: string;
   releasedAt: string;
   releaseBatchId: string | null;
   releaseNote: string | null;

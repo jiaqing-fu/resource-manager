@@ -1023,11 +1023,13 @@ async function main() {
         rest.parentReleased,
       "释放全部剩余 U 位后父分配应自动释放",
     );
+    const releasedParent = await tx.resourceAllocation.findUniqueOrThrow({
+      where: { id: setAllocation.allocation.id },
+    });
+    assert(releasedParent.releasedAt !== null, "父分配应写入释放时间");
     assert(
-      (await tx.resourceAllocation.findUniqueOrThrow({
-        where: { id: setAllocation.allocation.id },
-      })).releasedAt !== null,
-      "父分配应写入释放时间",
+      releasedParent.releaseBatchId === rest.releaseBatchId,
+      "整条释放后父分配应保存最后一次释放批次",
     );
     assert(
       (await tx.rack.findUniqueOrThrow({ where: { id: uListRack.id } }))
@@ -1087,6 +1089,15 @@ async function main() {
       batch.released === 2 && batch.totalUnits === 4,
       "应批量释放 2 条共 4 个 U 位",
     );
+    const firstParent = await tx.resourceAllocation.findUniqueOrThrow({
+      where: { id: first.allocation.id },
+    });
+    assert(
+      firstParent.releaseNote === "批量释放整条分配" &&
+        firstParent.releasedByName === "批量操作员" &&
+        firstParent.releaseBatchId === batch.releaseBatchId,
+      "整条释放的父分配应保存备注、操作人与批次",
+    );
     const batchItems = await tx.rackAllocationItem.findMany({
       where: {
         allocationId: { in: [first.allocation.id, second.allocation.id] },
@@ -1137,6 +1148,61 @@ async function main() {
     );
   });
   console.log("PASS 批量释放多条分配共用批次号与失败回滚");
+
+  // 17. 非区间资源整条释放保存备注/操作人/批次（含单个释放）。
+  const noteVlan = await prisma.vlan.create({
+    data: { vid: 300, name: "NOTE-VLAN" },
+  });
+  const noteIp = await prisma.ipAddress.create({
+    data: { address: "10.50.0.10" },
+  });
+  await prisma.$transaction(async (tx) => {
+    const vlanAllocation = await createAllocation(tx, {
+      customerId: customerA.id,
+      resourceType: "vlan",
+      resourceId: noteVlan.id,
+      allocatedAt: "2026-11-01",
+    });
+    const batch = await releaseAllocations(tx, {
+      ids: [vlanAllocation.allocation.id],
+      releasedAt: "2026-11-05",
+      releaseNote: "整条释放备注",
+      releasedByName: "备注测试员",
+    });
+    assert(batch.releaseBatchId !== null, "整条释放也应生成批次号");
+    const vlanRow = await tx.resourceAllocation.findUniqueOrThrow({
+      where: { id: vlanAllocation.allocation.id },
+    });
+    assert(
+      vlanRow.releasedAt !== null &&
+        vlanRow.releaseNote === "整条释放备注" &&
+        vlanRow.releasedByName === "备注测试员" &&
+        vlanRow.releaseBatchId === batch.releaseBatchId,
+      "非区间资源批量释放应保存备注、操作人与批次",
+    );
+
+    const ipAllocation = await createAllocation(tx, {
+      customerId: customerB.id,
+      resourceType: "ipAddress",
+      resourceId: noteIp.id,
+      allocatedAt: "2026-11-01",
+    });
+    const single = await releaseAllocation(tx, ipAllocation.allocation.id, {
+      releasedAt: "2026-11-05",
+      releaseNote: "单个释放备注",
+      releasedByName: "备注测试员",
+    });
+    const ipRow = await tx.resourceAllocation.findUniqueOrThrow({
+      where: { id: ipAllocation.allocation.id },
+    });
+    assert(
+      ipRow.releaseNote === "单个释放备注" &&
+        ipRow.releaseBatchId === single.releaseBatchId &&
+        ipRow.releaseBatchId !== null,
+      "单个释放非区间资源也应保存释放信息",
+    );
+  });
+  console.log("PASS 非区间资源释放备注/操作人/批次保存");
 
   console.log(`\n全部业务规则测试通过（供应商 ${supplier.name}，机柜 ${rangeRack.code} 等）。`);
 }

@@ -1721,10 +1721,18 @@ async function releaseIpAllocation(
     }
   }
 
+  const releaseBatchId = options.batchId?.trim() || randomUUID();
+
   if (items.length === 0) {
     const updated = await tx.resourceAllocation.update({
       where: { id: allocation.id },
-      data: { releasedAt, activeKey: null },
+      data: {
+        releasedAt,
+        activeKey: null,
+        releaseNote: options.releaseNote ?? null,
+        releasedByName: options.releasedByName ?? null,
+        releaseBatchId,
+      },
     });
     return {
       allocation: updated,
@@ -1732,7 +1740,7 @@ async function releaseIpAllocation(
       before: allocation,
       releasedCount: 0,
       remainingCount: 0,
-      releaseBatchId: null as string | null,
+      releaseBatchId,
       parentReleased: true,
     };
   }
@@ -1782,7 +1790,13 @@ async function releaseIpAllocation(
   if (targets.length === 0) {
     const updated = await tx.resourceAllocation.update({
       where: { id: allocation.id },
-      data: { releasedAt, activeKey: null },
+      data: {
+        releasedAt,
+        activeKey: null,
+        releaseNote: options.releaseNote ?? null,
+        releasedByName: options.releasedByName ?? null,
+        releaseBatchId,
+      },
     });
     return {
       allocation: updated,
@@ -1790,12 +1804,11 @@ async function releaseIpAllocation(
       before: allocation,
       releasedCount: 0,
       remainingCount: 0,
-      releaseBatchId: null as string | null,
+      releaseBatchId,
       parentReleased: true,
     };
   }
 
-  const releaseBatchId = options.batchId?.trim() || randomUUID();
   const updatedItems = await tx.resourceAllocationItem.updateMany({
     where: {
       allocationId: allocation.id,
@@ -1824,7 +1837,13 @@ async function releaseIpAllocation(
   const updatedAllocation = parentReleased
     ? await tx.resourceAllocation.update({
         where: { id: allocation.id },
-        data: { releasedAt, activeKey: null },
+        data: {
+          releasedAt,
+          activeKey: null,
+          releaseNote: options.releaseNote ?? null,
+          releasedByName: options.releasedByName ?? null,
+          releaseBatchId,
+        },
       })
     : await tx.resourceAllocation.findUniqueOrThrow({
         where: { id: allocation.id },
@@ -1878,10 +1897,18 @@ async function releaseRackAllocation(
     items = units.map((uNumber) => ({ uNumber, releasedAt: null }));
   }
 
+  const releaseBatchId = options.batchId?.trim() || randomUUID();
+
   if (items.length === 0) {
     const updated = await tx.resourceAllocation.update({
       where: { id: allocation.id },
-      data: { releasedAt, activeKey: null },
+      data: {
+        releasedAt,
+        activeKey: null,
+        releaseNote: options.releaseNote ?? null,
+        releasedByName: options.releasedByName ?? null,
+        releaseBatchId,
+      },
     });
     return {
       allocation: updated,
@@ -1889,7 +1916,7 @@ async function releaseRackAllocation(
       before: allocation,
       releasedCount: 0,
       remainingCount: 0,
-      releaseBatchId: null as string | null,
+      releaseBatchId,
       parentReleased: true,
     };
   }
@@ -1943,7 +1970,13 @@ async function releaseRackAllocation(
   if (targets.length === 0) {
     const updated = await tx.resourceAllocation.update({
       where: { id: allocation.id },
-      data: { releasedAt, activeKey: null },
+      data: {
+        releasedAt,
+        activeKey: null,
+        releaseNote: options.releaseNote ?? null,
+        releasedByName: options.releasedByName ?? null,
+        releaseBatchId,
+      },
     });
     return {
       allocation: updated,
@@ -1951,12 +1984,11 @@ async function releaseRackAllocation(
       before: allocation,
       releasedCount: 0,
       remainingCount: 0,
-      releaseBatchId: null as string | null,
+      releaseBatchId,
       parentReleased: true,
     };
   }
 
-  const releaseBatchId = options.batchId?.trim() || randomUUID();
   const updatedItems = await tx.rackAllocationItem.updateMany({
     where: {
       allocationId: allocation.id,
@@ -1985,7 +2017,13 @@ async function releaseRackAllocation(
   const updatedAllocation = parentReleased
     ? await tx.resourceAllocation.update({
         where: { id: allocation.id },
-        data: { releasedAt, activeKey: null },
+        data: {
+          releasedAt,
+          activeKey: null,
+          releaseNote: options.releaseNote ?? null,
+          releasedByName: options.releasedByName ?? null,
+          releaseBatchId,
+        },
       })
     : await tx.resourceAllocation.findUniqueOrThrow({
         where: { id: allocation.id },
@@ -2070,9 +2108,16 @@ export async function releaseAllocation(
     );
   }
 
+  const releaseBatchId = opts.batchId?.trim() || randomUUID();
   const updated = await tx.resourceAllocation.update({
     where: { id },
-    data: { releasedAt, activeKey: null },
+    data: {
+      releasedAt,
+      activeKey: null,
+      releaseNote: opts.releaseNote ?? null,
+      releasedByName: opts.releasedByName ?? null,
+      releaseBatchId,
+    },
   });
 
   const resourceType = allocation.resourceType;
@@ -2097,7 +2142,7 @@ export async function releaseAllocation(
     before: allocation,
     releasedCount: 0,
     remainingCount: 0,
-    releaseBatchId: null as string | null,
+    releaseBatchId,
     parentReleased: true,
   };
 }
