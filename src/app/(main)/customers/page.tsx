@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import Link from "next/link";
 import useSWR from "swr";
 import {
   App,
@@ -27,6 +26,7 @@ import {
 } from "@ant-design/icons";
 import { PageHeader } from "@/components/PageHeader";
 import { CrudDrawer } from "@/components/CrudDrawer";
+import { CustomerRelatedResources } from "@/components/CustomerRelatedResources";
 import { ImportExport } from "@/components/ImportExport";
 import { PartyHierarchyFields } from "@/components/PartyHierarchyFields";
 import { Maybe } from "@/components/Tags";
@@ -441,7 +441,8 @@ export default function CustomersPage() {
       <Drawer
         open={detailOpen}
         title={detail ? `客户详情：${detail.name}` : "客户详情"}
-        width={680}
+        width={900}
+        destroyOnHidden
         onClose={() => setDetailOpen(false)}
         loading={detailLoading && !detail}
       >
@@ -463,38 +464,11 @@ export default function CustomersPage() {
             </Descriptions>
 
             <Typography.Title level={5} style={{ marginTop: 18 }}>关联资源</Typography.Title>
-            <Space wrap>
-              <Link href={`/resource-allocations?customerId=${detail.id}`}>
-                <Tag color="gold">{detail._count?.allocations ?? 0} 条资源分配</Tag>
-              </Link>
-              <Link href={`/ip/addresses?customerId=${detail.id}`}>
-                <Tag color="blue">{detail._count?.ipAddresses ?? 0} 个 IP 地址</Tag>
-              </Link>
-              <Link href={`/ip/blocks?customerId=${detail.id}`}>
-                <Tag color="blue">{detail._count?.ipBlocks ?? 0} 个 IP 段</Tag>
-              </Link>
-              <Link href={`/vlans?customerId=${detail.id}`}>
-                <Tag color="cyan">{detail._count?.vlans ?? 0} 个 VLAN</Tag>
-              </Link>
-              <Link href={`/vxlans?customerId=${detail.id}`}>
-                <Tag color="cyan">{detail._count?.vxlans ?? 0} 个 VXLAN</Tag>
-              </Link>
-              <Link href={`/broadbands?customerId=${detail.id}`}>
-                <Tag color="orange">{detail._count?.broadbands ?? 0} 条宽带</Tag>
-              </Link>
-              <Link href={`/lines?customerId=${detail.id}`}>
-                <Tag color="cyan">{detail._count?.lines ?? 0} 条线路</Tag>
-              </Link>
-              <Link href={`/racks?customerId=${detail.id}`}>
-                <Tag color="geekblue">{detail._count?.racks ?? 0} 个机柜</Tag>
-              </Link>
-              <Link href={`/devices?customerId=${detail.id}`}>
-                <Tag color="purple">{detail._count?.devices ?? 0} 台设备</Tag>
-              </Link>
-              <Link href={`/customer-tests?customerId=${detail.id}`}>
-                <Tag color="orange">{detail._count?.customerTests ?? 0} 条测试</Tag>
-              </Link>
-            </Space>
+            <CustomerRelatedResources
+              key={detail.id}
+              customerId={detail.id}
+              counts={detail._count}
+            />
 
             {detail.children && detail.children.length > 0 ? (
               <>

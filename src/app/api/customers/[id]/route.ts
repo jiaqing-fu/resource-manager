@@ -6,6 +6,7 @@ import { PARTY_STATUS } from "@/lib/enums";
 import { assertNameUnique } from "@/server/services/party-write";
 import { assertPartyDeletable, validatePartyHierarchy } from "@/server/services/party";
 import { assertSalespersonExists } from "@/server/services/salesperson";
+import { customerIpBlockWhere } from "@/server/services/ipam";
 import { writeChangeLog } from "@/lib/changelog";
 import { nullableId, optionalText, requiredText, zEnum } from "@/lib/validators";
 
@@ -38,7 +39,6 @@ export async function GET(req: NextRequest, { params }: Params) {
         children: { select: { id: true, name: true, level: true } },
         _count: {
           select: {
-            ipBlocks: true,
             ipAddresses: true,
             vlans: true,
             vxlans: true,
@@ -51,7 +51,7 @@ export async function GET(req: NextRequest, { params }: Params) {
       },
     });
     if (!customer) throw new ApiError(404, "客户不存在", "NOT_FOUND");
-    const [rackAllocations, broadbandAllocations] = await Promise.all([
+    const [rackAllocations, broadbandAllocations, ipBlockCount] = await Promise.all([
       prisma.resourceAllocation.findMany({
         where: { customerId: id, releasedAt: null, resourceType: "rack", rackId: { not: null } },
         select: { rackId: true },
@@ -67,11 +67,13 @@ export async function GET(req: NextRequest, { params }: Params) {
         select: { broadbandId: true },
         distinct: ["broadbandId"],
       }),
+      prisma.ipBlock.count({ where: customerIpBlockWhere(id) }),
     ]);
     return jsonOk({
       ...customer,
       _count: {
         ...customer._count,
+        ipBlocks: ipBlockCount,
         racks: rackAllocations.length,
         broadbands: broadbandAllocations.length,
       },

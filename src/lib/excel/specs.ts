@@ -207,12 +207,21 @@ const rackSheet: SheetSpec = {
 const vlanSheet: SheetSpec = {
   key: "main",
   name: "VLAN",
-  description: "同一供应商下 VLAN ID 唯一；供应商必填。",
+  description:
+    "同一供应商下 VLAN ID 唯一；供应商必填。客户列可选，客户必须已存在；二级客户必须同时填写其一级客户；填写后为该 VLAN 建立资源分配。",
   columns: [
     int("vid", "VLAN ID", { required: true, width: 10, example: "100" }),
     text("name", "VLAN 名称", { required: true, width: 24 }),
     en("status", "状态", VLAN_STATUS, { width: 10 }),
     ref("supplierName", "供应商（必填）", "supplier", { width: 24 }),
+    ref("customerLevel1", "一级客户", "customer", {
+      width: 24,
+      note: "可选；填写后为该资源创建客户分配，必须是已存在的一级客户。",
+    }),
+    ref("customerLevel2", "二级客户（需填写一级客户）", "customer", {
+      width: 28,
+      note: "可选；填写时必须同时填写一级客户，且必须是该一级客户下的二级客户。",
+    }),
     text("description", "描述", { width: 32 }),
   ],
 };
@@ -221,13 +230,21 @@ const vxlanSheet: SheetSpec = {
   key: "main",
   name: "VXLAN",
   description:
-    "VNI 全局唯一，范围 1-16777215；一个 VLAN 最多关联一个 VXLAN。供应商可留空，由关联 VLAN 继承。",
+    "VNI 全局唯一，范围 1-16777215；一个 VLAN 最多关联一个 VXLAN。供应商可留空，由关联 VLAN 继承。客户列可选，客户必须已存在；二级客户必须同时填写其一级客户；填写后为该 VXLAN 建立资源分配。",
   columns: [
     int("vni", "VNI", { required: true, width: 14, example: "10010" }),
     text("name", "VXLAN 名称", { width: 24 }),
     en("status", "状态", VXLAN_STATUS, { width: 10 }),
     int("vlanVid", "关联 VLAN ID（可空）", { width: 16 }),
     ref("supplierName", "供应商（可继承 VLAN）", "supplier", { width: 24 }),
+    ref("customerLevel1", "一级客户", "customer", {
+      width: 24,
+      note: "可选；填写后为该资源创建客户分配，必须是已存在的一级客户。",
+    }),
+    ref("customerLevel2", "二级客户（需填写一级客户）", "customer", {
+      width: 28,
+      note: "可选；填写时必须同时填写一级客户，且必须是该一级客户下的二级客户。",
+    }),
     text("description", "描述", { width: 32 }),
   ],
 };
@@ -258,13 +275,21 @@ const ipAddressSheet: SheetSpec = {
   key: "main",
   name: "IP地址",
   description:
-    "IP 地址全局唯一。供应商可留空，依次从网段、设备、机柜、线路继承；主管理 IP 需绑定设备。",
+    "IP 地址全局唯一。供应商可留空，依次从网段、设备、机柜、线路继承；主管理 IP 需绑定设备。客户列可选，客户必须已在客户管理中创建；二级客户必须同时填写其一级客户；填写后为该 IP 建立资源分配。",
   columns: [
     text("address", "IP 地址", { required: true, width: 20, example: "192.168.1.10" }),
     ref("blockCidr", "所在网段（CIDR / IP 区间）", "ipBlock", { width: 26 }),
     en("status", "状态", IP_ADDRESS_STATUS, { required: true, width: 12 }),
     en("role", "角色", IP_ADDRESS_ROLES, { width: 14 }),
     ref("supplierName", "供应商（可继承）", "supplier", { width: 24 }),
+    ref("customerLevel1", "一级客户", "customer", {
+      width: 24,
+      note: "可选；填写后为该 IP 创建客户分配，必须是已存在的一级客户。",
+    }),
+    ref("customerLevel2", "二级客户（需填写一级客户）", "customer", {
+      width: 28,
+      note: "可选；填写时必须同时填写一级客户，且必须是该一级客户下的二级客户。",
+    }),
     text("rackCode", "机柜编号", { width: 14 }),
     ref("deviceName", "设备名称", "device", { width: 22 }),
     ref("lineCode", "线路编号", "line", { width: 18 }),
@@ -279,7 +304,7 @@ const deviceSheet: SheetSpec = {
   key: "main",
   name: "设备",
   description:
-    "设备放入机柜时必须填写起始 U 位；同机柜同面板 U 位不可重叠。供应商可留空，由机柜继承。管理 IP 必须已存在于 IP 台账。",
+    "设备放入机柜时必须填写起始 U 位；同机柜同面板 U 位不可重叠。供应商可留空，由机柜继承。管理 IP 必须已存在于 IP 台账。客户列可选，客户必须已存在；二级客户必须同时填写其一级客户；填写后为该设备建立资源分配。",
   columns: [
     text("name", "设备名称", { required: true, width: 24, example: "核心路由器-01" }),
     en("type", "类型", DEVICE_TYPES, { required: true, width: 12 }),
@@ -296,6 +321,14 @@ const deviceSheet: SheetSpec = {
     int("uHeight", "高度（U）", { width: 12 }),
     en("face", "面板", DEVICE_FACES, { width: 10 }),
     ref("supplierName", "供应商（可继承机柜）", "supplier", { width: 24 }),
+    ref("customerLevel1", "一级客户", "customer", {
+      width: 24,
+      note: "可选；填写后为该资源创建客户分配，必须是已存在的一级客户。",
+    }),
+    ref("customerLevel2", "二级客户（需填写一级客户）", "customer", {
+      width: 28,
+      note: "可选；填写时必须同时填写一级客户，且必须是该一级客户下的二级客户。",
+    }),
     text("owner", "负责人", { width: 14 }),
     date("lastInventoryAt", "最近盘点日期", { width: 16 }),
     date("purchaseDate", "采购日期", { width: 14 }),
@@ -308,13 +341,22 @@ const deviceSheet: SheetSpec = {
 const lineSheet: SheetSpec = {
   key: "main",
   name: "线路",
-  description: "线路编号全局唯一；供应商必填；A/Z 端点在第二个工作表维护。",
+  description:
+    "线路编号全局唯一；供应商必填；A/Z 端点在第二个工作表维护。客户列可选，客户必须已存在；二级客户必须同时填写其一级客户；填写后为该线路建立资源分配。",
   columns: [
     text("code", "线路编号", { required: true, width: 18, example: "LN-2026-001" }),
     text("name", "线路名称", { required: true, width: 24 }),
     en("type", "类型", LINE_TYPES, { width: 14 }),
     en("status", "状态", LINE_STATUS, { width: 12 }),
     ref("supplierName", "供应商（必填）", "supplier", { width: 24 }),
+    ref("customerLevel1", "一级客户", "customer", {
+      width: 24,
+      note: "可选；填写后为该资源创建客户分配，必须是已存在的一级客户。",
+    }),
+    ref("customerLevel2", "二级客户（需填写一级客户）", "customer", {
+      width: 28,
+      note: "可选；填写时必须同时填写一级客户，且必须是该一级客户下的二级客户。",
+    }),
     int("bandwidthMbps", "带宽（Mbps）", { width: 14 }),
     num("monthlyFeeYuan", "月租（元）", { width: 14 }),
     text("circuitNo", "电路号", { width: 18 }),
@@ -441,7 +483,7 @@ export const MODULES: Record<string, ModuleSpec> = {
     sheets: [customerSheet],
     refs: ["customer", "salesperson"],
     importHint:
-      "先导入一级客户，再导入二级客户；业务员必须是系统中已存在的姓名（由管理员在「业务员管理」维护）。客户与资源的关联请在系统「资源分配」中操作。",
+      "先导入一级客户，再导入二级客户；业务员必须是系统中已存在的姓名（由管理员在「业务员管理」维护）。IP 地址、VLAN、VXLAN、线路、设备的创建或导入也可绑定客户；客户变更和释放仍在系统「资源分配」中操作。",
   },
   racks: {
     key: "racks",
@@ -455,18 +497,20 @@ export const MODULES: Record<string, ModuleSpec> = {
   vlans: {
     key: "vlans",
     label: "VLAN",
-    version: "2.0",
+    version: "2.1",
     sheets: [vlanSheet],
-    refs: ["supplier"],
-    importHint: "导入前先建立供应商；同一供应商下 VLAN ID 唯一，供应商必填。",
+    refs: ["supplier", "customer"],
+    importHint:
+      "导入前先建立供应商、客户；同一供应商下 VLAN ID 唯一，供应商必填。一级/二级客户列可选，客户必须已存在，二级客户必须同时填写其一级客户；填写后会为 VLAN 建立资源分配，客户不存在或 VLAN 已分配给其他客户时整批不导入。",
   },
   vxlans: {
     key: "vxlans",
     label: "VXLAN",
-    version: "2.0",
+    version: "2.1",
     sheets: [vxlanSheet],
-    refs: ["vlan", "supplier"],
-    importHint: "导入前先建立 VLAN、供应商；VNI 全局唯一，供应商可由关联 VLAN 继承。",
+    refs: ["vlan", "supplier", "customer"],
+    importHint:
+      "导入前先建立 VLAN、供应商、客户；VNI 全局唯一，供应商可由关联 VLAN 继承。一级/二级客户列可选，客户必须已存在，二级客户必须同时填写其一级客户；填写后会为 VXLAN 建立资源分配，客户不存在或 VXLAN 已分配给其他客户时整批不导入。",
   },
   "ip-blocks": {
     key: "ip-blocks",
@@ -480,28 +524,29 @@ export const MODULES: Record<string, ModuleSpec> = {
   devices: {
     key: "devices",
     label: "设备",
-    version: "2.0",
+    version: "2.1",
     sheets: [deviceSheet],
-    refs: ["supplier", "rack"],
+    refs: ["supplier", "rack", "customer"],
     importHint:
-      "导入前先建立机柜、供应商；设备按「机柜编号 + 起始 U 位」匹配机柜区间，供应商可由机柜继承，管理 IP 必须已存在 IP 台账。",
+      "导入前先建立机柜、供应商、客户；设备按「机柜编号 + 起始 U 位」匹配机柜区间，供应商可由机柜继承，管理 IP 必须已存在 IP 台账。一级/二级客户列可选，客户必须已存在，二级客户必须同时填写其一级客户；填写后会为设备建立资源分配，客户不存在或设备已分配给其他客户时整批不导入。",
   },
   lines: {
     key: "lines",
     label: "线路及 A/Z 端点",
-    version: "2.0",
+    version: "2.1",
     sheets: [lineSheet, lineTermSheet],
-    refs: ["supplier", "device"],
-    importHint: "导入前先建立供应商、机柜、设备；线路供应商必填。",
+    refs: ["supplier", "device", "customer"],
+    importHint:
+      "导入前先建立供应商、机柜、设备、客户；线路供应商必填。一级/二级客户列可选，客户必须已存在，二级客户必须同时填写其一级客户；填写后会为线路建立资源分配，客户不存在或线路已分配给其他客户时整批不导入。",
   },
   "ip-addresses": {
     key: "ip-addresses",
     label: "IP 地址",
-    version: "2.1",
+    version: "2.2",
     sheets: [ipAddressSheet],
-    refs: ["ipBlock", "supplier", "rack", "device", "line"],
+    refs: ["ipBlock", "supplier", "customer", "rack", "device", "line"],
     importHint:
-      "导入前先建立 IP 段（CIDR 或 IP 区间）、机柜、设备、线路；供应商可依次从网段/设备/机柜/线路继承。",
+      "导入前先建立 IP 段（CIDR 或 IP 区间）、机柜、设备、线路、客户；供应商可依次从网段/设备/机柜/线路继承。一级/二级客户列可选，客户必须已存在，二级客户必须同时填写其一级客户；填写后会为 IP 建立资源分配，客户不存在或 IP 已分配给其他客户时整批不导入。",
   },
   broadbands: {
     key: "broadbands",

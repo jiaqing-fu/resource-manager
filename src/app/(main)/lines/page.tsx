@@ -30,6 +30,7 @@ import {
 } from "@ant-design/icons";
 import { PageHeader } from "@/components/PageHeader";
 import { CrudDrawer } from "@/components/CrudDrawer";
+import { CustomerBindingField } from "@/components/CustomerBindingField";
 import { ImportExport } from "@/components/ImportExport";
 import { LineTerminationsEditor, type TerminationFormValue } from "@/components/LineTerminationsEditor";
 import { PartySelect } from "@/components/PartySelect";
@@ -57,6 +58,7 @@ type LineForm = {
   type: string;
   status: string;
   supplierId?: string | null;
+  customerId?: string | null;
   bandwidthMbps?: number | null;
   monthlyFeeYuan?: number | null;
   circuitNo?: string;
@@ -196,6 +198,7 @@ export default function LinesPage() {
     type: values.type,
     status: values.status,
     supplierId: values.supplierId ?? null,
+    customerId: values.customerId || null,
     bandwidthMbps: values.bandwidthMbps ?? null,
     monthlyFeeCents:
       values.monthlyFeeYuan === null || values.monthlyFeeYuan === undefined
@@ -567,6 +570,15 @@ export default function LinesPage() {
                   >
                     <Input maxLength={100} />
                   </Form.Item>
+                  {!editing ? (
+                    <Form.Item
+                      name={[field.name, "customerId"]}
+                      label="绑定客户（可选）"
+                      style={{ flex: 1 }}
+                    >
+                      <CustomerBindingField />
+                    </Form.Item>
+                  ) : null}
                 </Space>
 
                 <Space size={12} style={{ display: "flex" }} align="start">

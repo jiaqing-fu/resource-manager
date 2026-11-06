@@ -18,6 +18,7 @@ export const vxlanSchema = z.object({
   description: optionalText(500),
   vlanId: nullableId,
   supplierId: nullableId,
+  customerId: nullableId,
 });
 
 export const vxlanUpdateSchema = z.object({

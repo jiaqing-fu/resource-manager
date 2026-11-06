@@ -14,6 +14,7 @@ import {
 } from "@/lib/api";
 import { IP_ADDRESS_ROLES, IP_ADDRESS_STATUS } from "@/lib/enums";
 import { ipAddressSchema } from "@/lib/ip-address-schema";
+import { assignResourceCustomer } from "@/server/services/allocations";
 import { recomputeIpCustomersForSpan, validateAddressInput } from "@/server/services/ipam";
 import { resolveSupplierForCreate } from "@/server/services/supplier-requirements";
 import { writeChangeLog } from "@/lib/changelog";
@@ -115,16 +116,33 @@ export async function POST(req: NextRequest) {
       const ip = await tx.ipAddress.create({
         data: data as unknown as Prisma.IpAddressUncheckedCreateInput,
       });
-      await recomputeIpCustomersForSpan(tx, ip.address, ip.address);
+      if (body.customerId) {
+        await assignResourceCustomer(tx, {
+          resourceType: "ipAddress",
+          resourceId: ip.id,
+          customerId: body.customerId,
+          allocatedAt: body.assignedAt,
+          notes: "创建资源时绑定",
+        });
+      } else {
+        await recomputeIpCustomersForSpan(tx, ip.address, ip.address);
+      }
+      const created = await tx.ipAddress.findUniqueOrThrow({
+        where: { id: ip.id },
+        include: {
+          supplier: { select: { id: true, name: true } },
+          customer: { select: { id: true, name: true } },
+        },
+      });
       await writeChangeLog(tx, {
         user,
         resource: "ipAddress",
-        recordId: ip.id,
+        recordId: created.id,
         action: "CREATE",
-        summary: `创建 IP ${ip.address}`,
-        after: ip,
+        summary: `创建 IP ${created.address}`,
+        after: created,
       });
-      return tx.ipAddress.findUniqueOrThrow({ where: { id: ip.id } });
+      return created;
     });
     return jsonOk(created, 201);
   } catch (error) {

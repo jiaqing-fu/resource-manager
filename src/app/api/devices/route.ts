@@ -13,6 +13,7 @@ import {
 } from "@/lib/api";
 import { DEVICE_ROLES, DEVICE_STATUS, DEVICE_TYPES } from "@/lib/enums";
 import { deviceSchema } from "@/lib/device-schema";
+import { assignResourceCustomer } from "@/server/services/allocations";
 import { validateDevicePlacement } from "@/server/services/inventory";
 import { resolveSupplierForCreate } from "@/server/services/supplier-requirements";
 import { writeChangeLog } from "@/lib/changelog";
@@ -102,7 +103,7 @@ export async function POST(req: NextRequest) {
           })
         : null;
       const supplierId = await resolveSupplierForCreate(tx, body.supplierId, [rack?.supplierId]);
-      const device = await tx.device.create({
+      let device = await tx.device.create({
         data: {
           name: body.name,
           type: body.type,
@@ -126,8 +127,25 @@ export async function POST(req: NextRequest) {
         include: {
           rack: { select: { id: true, code: true, location: true, uStart: true, uEnd: true } },
           supplier: { select: { id: true, name: true } },
+          customer: { select: { id: true, name: true } },
         },
       });
+      if (body.customerId) {
+        await assignResourceCustomer(tx, {
+          resourceType: "device",
+          resourceId: device.id,
+          customerId: body.customerId,
+          notes: "创建资源时绑定",
+        });
+        device = await tx.device.findUniqueOrThrow({
+          where: { id: device.id },
+          include: {
+            rack: { select: { id: true, code: true, location: true, uStart: true, uEnd: true } },
+            supplier: { select: { id: true, name: true } },
+            customer: { select: { id: true, name: true } },
+          },
+        });
+      }
       await writeChangeLog(tx, {
         user,
         resource: "device",

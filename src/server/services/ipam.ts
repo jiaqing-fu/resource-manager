@@ -869,6 +869,31 @@ export async function recomputeIpCustomersForSpan(
   );
 }
 
+/**
+ * 客户关联的 IP 段/区间：既包含直接归属（customerId 缓存），
+ * 也包含通过有效整段分配或区间分配产生的关联。
+ * IP 区间分配不会写入 IpBlock.customerId，必须从分配记录判断。
+ */
+export function customerIpBlockWhere(
+  customerId: string,
+): Prisma.IpBlockWhereInput {
+  return {
+    OR: [
+      { customerId },
+      {
+        allocations: {
+          some: {
+            customerId,
+            releasedAt: null,
+            resourceType: { in: ["ipBlock", "ipRange"] },
+            ipBlockId: { not: null },
+          },
+        },
+      },
+    ],
+  };
+}
+
 async function reparentAddressesToBlock(
   tx: Tx,
   block: RangeBlockRef,

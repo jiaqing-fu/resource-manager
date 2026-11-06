@@ -1632,6 +1632,198 @@ export async function createAllocation(tx: Tx, input: CreateAllocationInput) {
   };
 }
 
+export type IpAllocationOwner = {
+  customerId: string;
+  customerName: string;
+  source: "individual" | "range";
+};
+
+/**
+ * 查询一个 IP 当前的有效归属。单 IP 分配优先于 IP 区间/集合明细，
+ * 与 recomputeIpCustomersForAddresses 的优先级保持一致。
+ */
+export async function findActiveIpAllocationOwners(
+  tx: Tx,
+  params: { address: string; ipAddressId?: string | null },
+): Promise<IpAllocationOwner[]> {
+  const owners = new Map<string, IpAllocationOwner>();
+
+  if (params.ipAddressId) {
+    const individual = await tx.resourceAllocation.findMany({
+      where: {
+        resourceType: "ipAddress",
+        releasedAt: null,
+        ipAddressId: params.ipAddressId,
+      },
+      select: {
+        customerId: true,
+        customer: { select: { name: true } },
+      },
+    });
+    for (const row of individual) {
+      owners.set(row.customerId, {
+        customerId: row.customerId,
+        customerName: row.customer.name,
+        source: "individual",
+      });
+    }
+  }
+
+  const items = await tx.resourceAllocationItem.findMany({
+    where: {
+      releasedAt: null,
+      address: params.address,
+      allocation: { releasedAt: null },
+    },
+    select: {
+      allocation: {
+        select: {
+          customerId: true,
+          customer: { select: { name: true } },
+        },
+      },
+    },
+  });
+  for (const item of items) {
+    const customerId = item.allocation.customerId;
+    if (!owners.has(customerId)) {
+      owners.set(customerId, {
+        customerId,
+        customerName: item.allocation.customer.name,
+        source: "range",
+      });
+    }
+  }
+
+  return Array.from(owners.values());
+}
+
+/**
+ * 导入时把 IP 分配给客户：
+ * - 已归属同一客户：幂等，不重复创建分配；
+ * - 已归属其他客户：报错，由导入事务整批回滚；
+ * - 未归属：复用 createAllocation 创建单 IP 分配。
+ */
+export async function assignIpAddressOnImport(
+  tx: Tx,
+  input: {
+    ipAddressId: string;
+    address: string;
+    customerId: string;
+    customerName: string;
+    allocatedAt?: string | null;
+    notes?: string | null;
+  },
+): Promise<{ created: boolean; allocationId: string | null }> {
+  const owners = await findActiveIpAllocationOwners(tx, {
+    address: input.address,
+    ipAddressId: input.ipAddressId,
+  });
+  const otherCustomers = owners.filter((owner) => owner.customerId !== input.customerId);
+  if (otherCustomers.length > 0) {
+    const names = Array.from(new Set(otherCustomers.map((owner) => owner.customerName))).join("、");
+    throw new ApiError(
+      409,
+      `IP ${input.address} 已分配给客户「${names}」，不能再分配给客户「${input.customerName}」；请先在「资源分配」中释放`,
+      "IP_ALREADY_ALLOCATED_TO_OTHER_CUSTOMER",
+    );
+  }
+  if (owners.length > 0) {
+    return { created: false, allocationId: null };
+  }
+
+  const { allocation } = await createAllocation(tx, {
+    customerId: input.customerId,
+    resourceType: "ipAddress",
+    resourceId: input.ipAddressId,
+    allocatedAt: input.allocatedAt ?? undefined,
+    notes: input.notes ?? "Excel 批量导入",
+  });
+  return { created: true, allocationId: allocation.id };
+}
+
+export type CreationBindableResourceType =
+  | "ipAddress"
+  | "vlan"
+  | "vxlan"
+  | "line"
+  | "device";
+
+/**
+ * 创建资源或 Excel 导入时按客户绑定资源：
+ * - 已归属同一客户：幂等，不重复创建分配；
+ * - 已归属其他客户：报错，由调用方事务整体回滚；
+ * - 未归属：复用 createAllocation 创建分配。
+ *
+ * IP 地址会额外检查被 IP 区间覆盖的情况，规则与导入保持一致。
+ */
+export async function assignResourceCustomer(
+  tx: Tx,
+  input: {
+    resourceType: CreationBindableResourceType;
+    resourceId: string;
+    customerId: string;
+    allocatedAt?: string | null;
+    notes?: string | null;
+  },
+): Promise<{ created: boolean; allocationId: string | null }> {
+  const customer = await tx.customer.findUnique({
+    where: { id: input.customerId },
+    select: { id: true, name: true },
+  });
+  if (!customer) throw new ApiError(422, "所选客户不存在", "CUSTOMER_NOT_FOUND");
+
+  const resource = await getResourceForAllocation(tx, input.resourceType, input.resourceId);
+  if (input.resourceType === "ipAddress") {
+    const result = await assignIpAddressOnImport(tx, {
+      ipAddressId: input.resourceId,
+      address: resource.name,
+      customerId: customer.id,
+      customerName: customer.name,
+      allocatedAt: input.allocatedAt,
+      notes: input.notes ?? "创建资源时绑定",
+    });
+    // 单 IP 分配不存在但可能被 IP 区间覆盖；syncResourceCustomer 看不到区间明细。
+    if (!result.created) {
+      await recomputeIpCustomersForAddresses(tx, [resource.name]);
+    }
+    return result;
+  }
+
+  const field = FIELD_BY_TYPE[input.resourceType];
+  const active = await tx.resourceAllocation.findFirst({
+    where: {
+      resourceType: input.resourceType,
+      [field]: input.resourceId,
+      releasedAt: null,
+    } as Prisma.ResourceAllocationWhereInput,
+    select: {
+      customerId: true,
+      customer: { select: { name: true } },
+    },
+  });
+  if (active) {
+    if (active.customerId !== customer.id) {
+      throw new ApiError(
+        409,
+        `${resource.name} 已分配给客户「${active.customer.name}」，不能再分配给客户「${customer.name}」；请先在「资源分配」中释放`,
+        "RESOURCE_ALREADY_ALLOCATED",
+      );
+    }
+    await syncResourceCustomer(tx, input.resourceType, input.resourceId);
+    return { created: false, allocationId: null };
+  }
+
+  const { allocation } = await createAllocation(tx, {
+    customerId: customer.id,
+    resourceType: input.resourceType,
+    resourceId: input.resourceId,
+    allocatedAt: input.allocatedAt ?? undefined,
+    notes: input.notes ?? "创建资源时绑定",
+  });
+  return { created: true, allocationId: allocation.id };
+}
+
 export type ReleaseAllocationOptions = {
   releasedAt?: string | null;
   /** 仅释放指定 IP（IP/区间列表）；为空则释放该分配下全部有效 IP。 */

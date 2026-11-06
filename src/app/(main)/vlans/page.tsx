@@ -27,6 +27,7 @@ import {
 } from "@ant-design/icons";
 import { PageHeader } from "@/components/PageHeader";
 import { CrudDrawer } from "@/components/CrudDrawer";
+import { CustomerBindingField } from "@/components/CustomerBindingField";
 import { ImportExport } from "@/components/ImportExport";
 import { PartySelect } from "@/components/PartySelect";
 import { Maybe } from "@/components/Tags";
@@ -46,6 +47,7 @@ type VlanForm = {
   status: string;
   description?: string;
   supplierId?: string | null;
+  customerId?: string | null;
 };
 
 const defaults = (): VlanForm => ({ name: "", status: "active" });
@@ -119,6 +121,7 @@ export default function VlansPage() {
     status: values.status,
     description: values.description?.trim() || null,
     supplierId: values.supplierId || null,
+    customerId: values.customerId || null,
   });
 
   const submit = async () => {
@@ -386,6 +389,15 @@ export default function VlansPage() {
                   >
                     <PartySelect kind="supplier" parties={options?.suppliers} />
                   </Form.Item>
+                  {!editing ? (
+                    <Form.Item
+                      name={[field.name, "customerId"]}
+                      label="绑定客户（可选）"
+                      style={{ flex: 1 }}
+                    >
+                      <CustomerBindingField />
+                    </Form.Item>
+                  ) : null}
                   <Form.Item name={[field.name, "description"]} label="描述" style={{ flex: 2 }}>
                     <Input maxLength={500} />
                   </Form.Item>

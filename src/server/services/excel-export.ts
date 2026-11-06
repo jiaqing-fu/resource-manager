@@ -26,6 +26,7 @@ import {
   labelOf,
 } from "@/lib/enums";
 import type { Option } from "@/lib/enums";
+import { customerIpBlockWhere } from "@/server/services/ipam";
 import { testStatusWhere } from "@/server/services/status";
 
 export type ExportCell = string | number | boolean | null;
@@ -53,6 +54,16 @@ function boolLabel(value: boolean | null | undefined): string {
 function safeText(value: string | null | undefined): string | null {
   if (value === null || value === undefined) return null;
   return /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+}
+
+/** 按模板顺序返回一级/二级客户名称。 */
+function customerLevelNames(
+  customer: { name: string; level: number; parent: { name: string } | null } | null,
+): [string | null, string | null] {
+  if (!customer) return [null, null];
+  return customer.level === 2
+    ? [safeText(customer.parent?.name), safeText(customer.name)]
+    : [safeText(customer.name), null];
 }
 
 function keywordWhere(
@@ -271,7 +282,13 @@ async function vlansData(params: URLSearchParams): Promise<ExportSheets> {
     orderBy: { vid: "asc" },
     include: {
       supplier: { select: { name: true } },
-      customer: { select: { name: true } },
+      customer: {
+        select: {
+          name: true,
+          level: true,
+          parent: { select: { name: true } },
+        },
+      },
     },
   });
   return {
@@ -280,6 +297,7 @@ async function vlansData(params: URLSearchParams): Promise<ExportSheets> {
       safeText(v.name),
       enumLabel(VLAN_STATUS, v.status),
       safeText(v.supplier?.name),
+      ...customerLevelNames(v.customer),
       safeText(v.description),
     ]),
   };
@@ -316,7 +334,13 @@ async function vxlansData(params: URLSearchParams): Promise<ExportSheets> {
     include: {
       vlan: { select: { vid: true } },
       supplier: { select: { name: true } },
-      customer: { select: { name: true } },
+      customer: {
+        select: {
+          name: true,
+          level: true,
+          parent: { select: { name: true } },
+        },
+      },
     },
   });
   return {
@@ -326,6 +350,7 @@ async function vxlansData(params: URLSearchParams): Promise<ExportSheets> {
       enumLabel(VXLAN_STATUS, v.status),
       v.vlan?.vid ?? null,
       safeText(v.supplier?.name),
+      ...customerLevelNames(v.customer),
       safeText(v.description),
     ]),
   };
@@ -333,6 +358,7 @@ async function vxlansData(params: URLSearchParams): Promise<ExportSheets> {
 
 async function ipBlocksData(params: URLSearchParams): Promise<ExportSheets> {
   const keyword = param(params, "keyword");
+  const customerId = param(params, "customerId");
   const or: Record<string, unknown>[] = [];
   if (keyword) {
     or.push(
@@ -353,7 +379,9 @@ async function ipBlocksData(params: URLSearchParams): Promise<ExportSheets> {
     enumValue(IP_BLOCK_ROLES, param(params, "role")) ? { role: param(params, "role") } : null,
     param(params, "parentId") ? { parentId: param(params, "parentId") } : null,
     param(params, "supplierId") ? { supplierId: param(params, "supplierId") } : null,
-    param(params, "customerId") ? { customerId: param(params, "customerId") } : null,
+    customerId
+      ? (customerIpBlockWhere(customerId) as unknown as Record<string, unknown>)
+      : null,
     param(params, "vlanId") ? { vlanId: param(params, "vlanId") } : null,
   ]);
   const list = await prisma.ipBlock.findMany({
@@ -416,27 +444,38 @@ async function ipAddressesData(params: URLSearchParams): Promise<ExportSheets> {
     include: {
       block: { select: { cidr: true } },
       supplier: { select: { name: true } },
-      customer: { select: { name: true } },
+      customer: {
+        select: {
+          name: true,
+          level: true,
+          parent: { select: { name: true } },
+        },
+      },
       rack: { select: { code: true } },
       device: { select: { name: true } },
       line: { select: { code: true } },
     },
   });
   return {
-    main: list.map((ip) => [
-      safeText(ip.address),
-      safeText(ip.block?.cidr),
-      enumLabel(IP_ADDRESS_STATUS, ip.status),
-      enumLabel(IP_ADDRESS_ROLES, ip.role),
-      safeText(ip.supplier?.name),
-      safeText(ip.rack?.code),
-      safeText(ip.device?.name),
-      safeText(ip.line?.code),
-      boolLabel(ip.isPrimary),
-      safeText(ip.dnsName),
-      safeText(ip.description),
-      ip.assignedAt,
-    ]),
+    main: list.map((ip) => {
+      const [customerLevel1, customerLevel2] = customerLevelNames(ip.customer);
+      return [
+        safeText(ip.address),
+        safeText(ip.block?.cidr),
+        enumLabel(IP_ADDRESS_STATUS, ip.status),
+        enumLabel(IP_ADDRESS_ROLES, ip.role),
+        safeText(ip.supplier?.name),
+        customerLevel1,
+        customerLevel2,
+        safeText(ip.rack?.code),
+        safeText(ip.device?.name),
+        safeText(ip.line?.code),
+        boolLabel(ip.isPrimary),
+        safeText(ip.dnsName),
+        safeText(ip.description),
+        ip.assignedAt,
+      ];
+    }),
   };
 }
 
@@ -480,7 +519,13 @@ async function devicesData(params: URLSearchParams): Promise<ExportSheets> {
     include: {
       rack: { select: { code: true } },
       supplier: { select: { name: true } },
-      customer: { select: { name: true } },
+      customer: {
+        select: {
+          name: true,
+          level: true,
+          parent: { select: { name: true } },
+        },
+      },
       ipAddresses: { where: { isPrimary: true }, take: 1, select: { address: true } },
     },
   });
@@ -501,6 +546,7 @@ async function devicesData(params: URLSearchParams): Promise<ExportSheets> {
       d.uHeight,
       enumLabel(DEVICE_FACES, d.face),
       safeText(d.supplier?.name),
+      ...customerLevelNames(d.customer),
       safeText(d.owner),
       d.lastInventoryAt,
       d.purchaseDate,
@@ -544,7 +590,13 @@ async function linesData(params: URLSearchParams): Promise<ExportSheets> {
     orderBy: { code: "asc" },
     include: {
       supplier: { select: { name: true } },
-      customer: { select: { name: true } },
+      customer: {
+        select: {
+          name: true,
+          level: true,
+          parent: { select: { name: true } },
+        },
+      },
       terminations: {
         orderBy: { side: "asc" },
         include: {
@@ -560,6 +612,7 @@ async function linesData(params: URLSearchParams): Promise<ExportSheets> {
     enumLabel(LINE_TYPES, l.type),
     enumLabel(LINE_STATUS, l.status),
     safeText(l.supplier?.name),
+    ...customerLevelNames(l.customer),
     l.bandwidthMbps,
     l.monthlyFeeCents === null ? null : Math.round(l.monthlyFeeCents) / 100,
     safeText(l.circuitNo),

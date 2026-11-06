@@ -22,6 +22,7 @@ import {
 } from "./inventory";
 import { validateEndpoints } from "./service-endpoints";
 import { assertSupplierConsistent } from "./supplier-requirements";
+import { assignResourceCustomer } from "./allocations";
 
 type Tx = Prisma.TransactionClient;
 
@@ -359,6 +360,59 @@ function resolveCustomer(
     );
   }
   return list[0];
+}
+
+/** 解析一级客户下的二级客户，用于 IP 地址导入的客户列。 */
+function resolveLevel2Customer(
+  ctx: Ctx,
+  parent: CustomerLite,
+  name: string,
+): CustomerLite {
+  const candidates = ctx.cache.customers.get(name) ?? [];
+  const underParent = candidates.filter(
+    (customer) => customer.level === 2 && customer.parentId === parent.id,
+  );
+  if (underParent.length === 0) {
+    const existsElsewhere = candidates.some((customer) => customer.level === 2);
+    throw new ApiError(
+      422,
+      existsElsewhere
+        ? `二级客户「${name}」不属于一级客户「${parent.name}」`
+        : `一级客户「${parent.name}」下不存在二级客户「${name}」`,
+      "CUSTOMER_NOT_FOUND",
+    );
+  }
+  if (underParent.length > 1) {
+    throw new ApiError(
+      422,
+      `客户名称「${name}」在「${parent.name}」下对应多条记录，无法唯一匹配，请先调整名称`,
+      "AMBIGUOUS_CUSTOMER",
+    );
+  }
+  return underParent[0];
+}
+
+/**
+ * 解析资源导入的一级/二级客户列：
+ * - 两列都为空：不绑定客户；
+ * - 只填一级：返回该一级客户；
+ * - 同时填写：返回该一级客户下的二级客户；
+ * - 只填二级或层级不匹配：报错，由导入事务整批回滚。
+ */
+function resolveImportedCustomer(ctx: Ctx, row: ParsedRow): CustomerLite | null {
+  const level1Name = text(row, "customerLevel1");
+  const level2Name = text(row, "customerLevel2");
+  if (!level1Name && !level2Name) return null;
+  if (!level1Name) {
+    throw new ApiError(
+      422,
+      `填写二级客户「${level2Name}」时必须同时填写一级客户`,
+      "CUSTOMER_LEVEL1_REQUIRED",
+    );
+  }
+  const parent = resolveCustomer(ctx, level1Name, { level: 1 });
+  if (!level2Name) return parent;
+  return resolveLevel2Customer(ctx, parent!, level2Name);
 }
 
 function resolveSalesperson(ctx: Ctx, name: string | null): SalespersonLite | null {
@@ -816,6 +870,13 @@ async function importVlans(ctx: Ctx, parsed: ParsedWorkbook): Promise<void> {
       }
       const supplier = resolveSupplier(ctx, supplierName);
       if (!supplier) continue;
+      let targetCustomer: CustomerLite | null = null;
+      try {
+        targetCustomer = resolveImportedCustomer(ctx, row);
+      } catch (error) {
+        recordApiError(ctx, row, text(row, "customerLevel2") ? "二级客户" : "一级客户", error);
+        continue;
+      }
       const key = `${supplier.id}|${vid}`;
       const existing = ctx.cache.vlans.get(key);
       const data = {
@@ -825,13 +886,16 @@ async function importVlans(ctx: Ctx, parsed: ParsedWorkbook): Promise<void> {
         description: text(row, "description"),
         supplierId: supplier.id,
       };
+      let vlanId: string;
       if (existing) {
         await ctx.tx.vlan.update({ where: { id: existing.id }, data });
         existing.name = name;
         existing.supplierId = supplier.id;
+        vlanId = existing.id;
         countRow(ctx, "main", "updated");
       } else {
         const created = await ctx.tx.vlan.create({ data });
+        vlanId = created.id;
         ctx.cache.vlans.set(key, {
           id: created.id,
           vid,
@@ -839,6 +903,18 @@ async function importVlans(ctx: Ctx, parsed: ParsedWorkbook): Promise<void> {
           supplierId: supplier.id,
         });
         countRow(ctx, "main", "created");
+      }
+      if (targetCustomer) {
+        try {
+          await assignResourceCustomer(ctx.tx, {
+            resourceType: "vlan",
+            resourceId: vlanId,
+            customerId: targetCustomer.id,
+            notes: "Excel 批量导入",
+          });
+        } catch (error) {
+          recordApiError(ctx, row, targetCustomer.level === 2 ? "二级客户" : "一级客户", error);
+        }
       }
     } catch (error) {
       recordApiError(ctx, row, "VLAN", error);
@@ -892,6 +968,14 @@ async function importVxlans(ctx: Ctx, parsed: ParsedWorkbook): Promise<void> {
       );
       assertSupplierConsistent(supplierId, vlan?.supplierId ?? null, " VLAN ");
 
+      let targetCustomer: CustomerLite | null = null;
+      try {
+        targetCustomer = resolveImportedCustomer(ctx, row);
+      } catch (error) {
+        recordApiError(ctx, row, text(row, "customerLevel2") ? "二级客户" : "一级客户", error);
+        continue;
+      }
+
       const data = {
         vni,
         name: text(row, "name"),
@@ -901,6 +985,7 @@ async function importVxlans(ctx: Ctx, parsed: ParsedWorkbook): Promise<void> {
         supplierId,
       };
 
+      let vxlanId: string;
       if (existing) {
         await ctx.tx.vxlan.update({ where: { id: existing.id }, data });
         if (existing.vlanId && existing.vlanId !== data.vlanId) {
@@ -910,9 +995,11 @@ async function importVxlans(ctx: Ctx, parsed: ParsedWorkbook): Promise<void> {
         existing.vlanId = data.vlanId;
         existing.supplierId = supplierId;
         if (data.vlanId) ctx.cache.vxlanByVlanId.set(data.vlanId, existing);
+        vxlanId = existing.id;
         countRow(ctx, "main", "updated");
       } else {
         const created = await ctx.tx.vxlan.create({ data });
+        vxlanId = created.id;
         const lite: VxlanLite = {
           id: created.id,
           vni,
@@ -922,6 +1009,18 @@ async function importVxlans(ctx: Ctx, parsed: ParsedWorkbook): Promise<void> {
         ctx.cache.vxlansByVni.set(vni, lite);
         if (data.vlanId) ctx.cache.vxlanByVlanId.set(data.vlanId, lite);
         countRow(ctx, "main", "created");
+      }
+      if (targetCustomer) {
+        try {
+          await assignResourceCustomer(ctx.tx, {
+            resourceType: "vxlan",
+            resourceId: vxlanId,
+            customerId: targetCustomer.id,
+            notes: "Excel 批量导入",
+          });
+        } catch (error) {
+          recordApiError(ctx, row, targetCustomer.level === 2 ? "二级客户" : "一级客户", error);
+        }
       }
     } catch (error) {
       recordApiError(ctx, row, "VXLAN", error);
@@ -1074,6 +1173,14 @@ async function importIpAddresses(ctx: Ctx, parsed: ParsedWorkbook): Promise<void
         "网段/设备/机柜/线路",
       );
 
+      let targetCustomer: CustomerLite | null = null;
+      try {
+        targetCustomer = resolveImportedCustomer(ctx, row);
+      } catch (error) {
+        recordApiError(ctx, row, text(row, "customerLevel2") ? "二级客户" : "一级客户", error);
+        continue;
+      }
+
       const data = await validateAddressInput(ctx.tx, {
         address: parsedIp.canonical,
         blockId: block?.id ?? null,
@@ -1094,17 +1201,20 @@ async function importIpAddresses(ctx: Ctx, parsed: ParsedWorkbook): Promise<void
           data: { isPrimary: false },
         });
       }
+      let ipAddressId: string;
       if (existing) {
         await ctx.tx.ipAddress.update({
           where: { id: existing.id },
           data: data as Prisma.IpAddressUncheckedUpdateInput,
         });
         existing.supplierId = (data.supplierId as string | null) ?? null;
+        ipAddressId = existing.id;
         countRow(ctx, "main", "updated");
       } else {
         const created = await ctx.tx.ipAddress.create({
           data: data as Prisma.IpAddressUncheckedCreateInput,
         });
+        ipAddressId = created.id;
         ctx.cache.ips.set(parsedIp.canonical, {
           id: created.id,
           address: parsedIp.canonical,
@@ -1112,7 +1222,23 @@ async function importIpAddresses(ctx: Ctx, parsed: ParsedWorkbook): Promise<void
         });
         countRow(ctx, "main", "created");
       }
-      await recomputeIpCustomersForSpan(ctx.tx, parsedIp.canonical, parsedIp.canonical);
+
+      if (targetCustomer) {
+        try {
+          await assignResourceCustomer(ctx.tx, {
+            resourceType: "ipAddress",
+            resourceId: ipAddressId,
+            customerId: targetCustomer.id,
+            allocatedAt: text(row, "assignedAt"),
+            notes: "Excel 批量导入",
+          });
+        } catch (error) {
+          recordApiError(ctx, row, targetCustomer.level === 2 ? "二级客户" : "一级客户", error);
+          continue;
+        }
+      } else {
+        await recomputeIpCustomersForSpan(ctx.tx, parsedIp.canonical, parsedIp.canonical);
+      }
     } catch (error) {
       recordApiError(ctx, row, "IP 地址", error);
     }
@@ -1159,6 +1285,13 @@ async function importDevices(ctx: Ctx, parsed: ParsedWorkbook): Promise<void> {
         },
         existing?.id,
       );
+      let targetCustomer: CustomerLite | null = null;
+      try {
+        targetCustomer = resolveImportedCustomer(ctx, row);
+      } catch (error) {
+        recordApiError(ctx, row, text(row, "customerLevel2") ? "二级客户" : "一级客户", error);
+        continue;
+      }
       const data = {
         name,
         type: text(row, "type") ?? "router",
@@ -1216,6 +1349,19 @@ async function importDevices(ctx: Ctx, parsed: ParsedWorkbook): Promise<void> {
         countRow(ctx, "main", "created");
       }
 
+      if (targetCustomer) {
+        try {
+          await assignResourceCustomer(ctx.tx, {
+            resourceType: "device",
+            resourceId: deviceId,
+            customerId: targetCustomer.id,
+            notes: "Excel 批量导入",
+          });
+        } catch (error) {
+          recordApiError(ctx, row, targetCustomer.level === 2 ? "二级客户" : "一级客户", error);
+        }
+      }
+
       const mgmtText = text(row, "managementIp");
       if (mgmtText) {
         const mgmt = resolveIp(ctx, mgmtText);
@@ -1265,6 +1411,13 @@ async function importLines(ctx: Ctx, parsed: ParsedWorkbook): Promise<void> {
         existing?.supplierId,
         "",
       );
+      let targetCustomer: CustomerLite | null = null;
+      try {
+        targetCustomer = resolveImportedCustomer(ctx, row);
+      } catch (error) {
+        recordApiError(ctx, row, text(row, "customerLevel2") ? "二级客户" : "一级客户", error);
+        continue;
+      }
       const data = {
         code,
         name,
@@ -1278,14 +1431,29 @@ async function importLines(ctx: Ctx, parsed: ParsedWorkbook): Promise<void> {
         expireDate: text(row, "expireDate"),
         description: text(row, "description"),
       };
+      let lineId: string;
       if (existing) {
         await ctx.tx.line.update({ where: { id: existing.id }, data });
         existing.supplierId = supplierId;
+        lineId = existing.id;
         countRow(ctx, "main", "updated");
       } else {
         const created = await ctx.tx.line.create({ data });
+        lineId = created.id;
         ctx.cache.lines.set(code, { id: created.id, code, supplierId });
         countRow(ctx, "main", "created");
+      }
+      if (targetCustomer) {
+        try {
+          await assignResourceCustomer(ctx.tx, {
+            resourceType: "line",
+            resourceId: lineId,
+            customerId: targetCustomer.id,
+            notes: "Excel 批量导入",
+          });
+        } catch (error) {
+          recordApiError(ctx, row, targetCustomer.level === 2 ? "二级客户" : "一级客户", error);
+        }
       }
     } catch (error) {
       recordApiError(ctx, row, "线路", error);

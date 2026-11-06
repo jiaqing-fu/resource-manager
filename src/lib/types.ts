@@ -177,6 +177,12 @@ export type IpBlock = {
   description: string | null;
   assignedAt: string | null;
   ipAddresses?: IpAddress[];
+  allocations?: Array<{
+    id: string;
+    resourceType: string;
+    ipRangeStart: string | null;
+    ipRangeEnd: string | null;
+  }>;
   _count?: Counts;
   createdAt: string;
   updatedAt: string;

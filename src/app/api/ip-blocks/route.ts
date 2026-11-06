@@ -15,6 +15,7 @@ import { IP_BLOCK_ROLES, IP_BLOCK_STATUS } from "@/lib/enums";
 import { ipBlockSchema } from "@/lib/ip-block-schema";
 import { ipInBlock, parseIp, parseStoredBlock, usableCount } from "@/lib/ip";
 import {
+  customerIpBlockWhere,
   recomputeBlockParents,
   syncRangeAddresses,
   validateBlockInput,
@@ -77,8 +78,11 @@ export async function GET(req: NextRequest) {
     if (role && IP_BLOCK_ROLES.some((o) => o.value === role)) where.role = role;
     if (parentId) where.parentId = parentId;
     if (supplierId) where.supplierId = supplierId;
-    if (customerId) where.customerId = customerId;
     if (vlanId) where.vlanId = vlanId;
+    if (customerId) {
+      // 客户条件与关键字 OR 通过 AND 组合，避免覆盖 where.OR。
+      where.AND = [customerIpBlockWhere(customerId)];
+    }
 
     const [rows, total] = await Promise.all([
       prisma.ipBlock.findMany({
@@ -92,6 +96,23 @@ export async function GET(req: NextRequest) {
           customer: { select: { id: true, name: true } },
           vlan: { select: { id: true, vid: true, name: true } },
           _count: { select: { children: true, ipAddresses: true } },
+          ...(customerId
+            ? {
+                allocations: {
+                  where: {
+                    customerId,
+                    releasedAt: null,
+                    ipBlockId: { not: null },
+                  },
+                  select: {
+                    id: true,
+                    resourceType: true,
+                    ipRangeStart: true,
+                    ipRangeEnd: true,
+                  },
+                },
+              }
+            : {}),
         },
       }),
       prisma.ipBlock.count({ where }),

@@ -13,6 +13,7 @@ import {
 import { VXLAN_STATUS } from "@/lib/enums";
 import { writeChangeLog } from "@/lib/changelog";
 import { vxlanSchema } from "@/lib/vxlan-schema";
+import { assignResourceCustomer } from "@/server/services/allocations";
 import {
   assertVniAvailable,
   resolveSupplierForVxlanCreate,
@@ -79,7 +80,7 @@ export async function POST(req: NextRequest) {
       const vlan = await resolveVxlanVlan(tx, body.vlanId);
       const supplierId = await resolveSupplierForVxlanCreate(tx, body.supplierId, vlan);
       await assertVniAvailable(tx, body.vni);
-      const vxlan = await tx.vxlan.create({
+      let vxlan = await tx.vxlan.create({
         data: {
           vni: body.vni,
           name: body.name ?? null,
@@ -92,8 +93,25 @@ export async function POST(req: NextRequest) {
         include: {
           vlan: { select: { id: true, vid: true, name: true } },
           supplier: { select: { id: true, name: true } },
+          customer: { select: { id: true, name: true } },
         },
       });
+      if (body.customerId) {
+        await assignResourceCustomer(tx, {
+          resourceType: "vxlan",
+          resourceId: vxlan.id,
+          customerId: body.customerId,
+          notes: "创建资源时绑定",
+        });
+        vxlan = await tx.vxlan.findUniqueOrThrow({
+          where: { id: vxlan.id },
+          include: {
+            vlan: { select: { id: true, vid: true, name: true } },
+            supplier: { select: { id: true, name: true } },
+            customer: { select: { id: true, name: true } },
+          },
+        });
+      }
       await writeChangeLog(tx, {
         user,
         resource: "vxlan",

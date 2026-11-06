@@ -18,6 +18,7 @@ export const ipAddressSchema = z.object({
   rackId: nullableId,
   deviceId: nullableId,
   lineId: nullableId,
+  customerId: nullableId,
   isPrimary: booleanField.default(false),
   dnsName: optionalText(200),
   description: optionalText(500),

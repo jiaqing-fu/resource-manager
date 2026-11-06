@@ -14,6 +14,7 @@ import {
 import { VLAN_STATUS } from "@/lib/enums";
 import { writeChangeLog } from "@/lib/changelog";
 import { vlanSchema } from "@/lib/vlan-schema";
+import { assignResourceCustomer } from "@/server/services/allocations";
 import { resolveSupplierForCreate } from "@/server/services/supplier-requirements";
 
 export const dynamic = "force-dynamic";
@@ -76,7 +77,7 @@ export async function POST(req: NextRequest) {
           "DUPLICATE_VID",
         );
       }
-      const vlan = await tx.vlan.create({
+      let vlan = await tx.vlan.create({
         data: {
           vid: body.vid,
           name: body.name,
@@ -85,8 +86,26 @@ export async function POST(req: NextRequest) {
           supplierId,
           customerId: null,
         },
-        include: { supplier: { select: { id: true, name: true } } },
+        include: {
+          supplier: { select: { id: true, name: true } },
+          customer: { select: { id: true, name: true } },
+        },
       });
+      if (body.customerId) {
+        await assignResourceCustomer(tx, {
+          resourceType: "vlan",
+          resourceId: vlan.id,
+          customerId: body.customerId,
+          notes: "创建资源时绑定",
+        });
+        vlan = await tx.vlan.findUniqueOrThrow({
+          where: { id: vlan.id },
+          include: {
+            supplier: { select: { id: true, name: true } },
+            customer: { select: { id: true, name: true } },
+          },
+        });
+      }
       await writeChangeLog(tx, {
         user,
         resource: "vlan",

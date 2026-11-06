@@ -8,6 +8,7 @@ export const vlanSchema = z.object({
   status: zEnum(VLAN_STATUS, "VLAN 状态").default("active"),
   description: optionalText(500),
   supplierId: nullableId,
+  customerId: nullableId,
 });
 
 export const vlanUpdateSchema = z.object({

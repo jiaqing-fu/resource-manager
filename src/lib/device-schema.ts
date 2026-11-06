@@ -25,6 +25,7 @@ export const deviceSchema = z.object({
   uHeight: z.coerce.number().int().min(1, "设备高度至少为 1U").max(100).default(1),
   face: zEnum(DEVICE_FACES, "面板").default("front"),
   supplierId: nullableId,
+  customerId: nullableId,
   owner: optionalText(50),
   lastInventoryAt: nullableDateStr,
   purchaseDate: nullableDateStr,

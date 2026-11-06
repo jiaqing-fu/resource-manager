@@ -30,6 +30,7 @@ import {
 } from "@ant-design/icons";
 import { PageHeader } from "@/components/PageHeader";
 import { CrudDrawer } from "@/components/CrudDrawer";
+import { CustomerBindingField } from "@/components/CustomerBindingField";
 import { ImportExport } from "@/components/ImportExport";
 import { PartySelect } from "@/components/PartySelect";
 import { Maybe } from "@/components/Tags";
@@ -68,6 +69,7 @@ type DeviceForm = {
   uHeight: number;
   face: string;
   supplierId?: string | null;
+  customerId?: string | null;
   owner?: string;
   lastInventoryAt?: Dayjs | null;
   purchaseDate?: Dayjs | null;
@@ -201,6 +203,7 @@ export default function DevicesPage() {
     uHeight: values.uHeight,
     face: values.face,
     supplierId: values.supplierId ?? null,
+    customerId: values.customerId || null,
     owner: values.owner?.trim() || null,
     lastInventoryAt: values.lastInventoryAt ? values.lastInventoryAt.format("YYYY-MM-DD") : null,
     purchaseDate: values.purchaseDate ? values.purchaseDate.format("YYYY-MM-DD") : null,
@@ -672,6 +675,15 @@ export default function DevicesPage() {
                   >
                     <PartySelect kind="supplier" parties={options?.suppliers} />
                   </Form.Item>
+                  {!editing ? (
+                    <Form.Item
+                      name={[field.name, "customerId"]}
+                      label="绑定客户（可选）"
+                      style={{ flex: 1 }}
+                    >
+                      <CustomerBindingField />
+                    </Form.Item>
+                  ) : null}
                 </Space>
 
                 <Space size={12} style={{ display: "flex" }} align="start">

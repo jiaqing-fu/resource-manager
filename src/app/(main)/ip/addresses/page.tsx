@@ -30,6 +30,7 @@ import {
 } from "@ant-design/icons";
 import { PageHeader } from "@/components/PageHeader";
 import { CrudDrawer } from "@/components/CrudDrawer";
+import { CustomerBindingField } from "@/components/CustomerBindingField";
 import { ImportExport } from "@/components/ImportExport";
 import { PartySelect } from "@/components/PartySelect";
 import { Maybe } from "@/components/Tags";
@@ -57,6 +58,7 @@ type IpForm = {
   rackId?: string | null;
   deviceId?: string | null;
   lineId?: string | null;
+  customerId?: string | null;
   isPrimary: boolean;
   dnsName?: string;
   description?: string;
@@ -82,7 +84,13 @@ const rackLabel = (rack: {
       : ""
   }`;
 
-function IpAddressFields({ index }: { index: number }) {
+function IpAddressFields({
+  index,
+  showCustomer,
+}: {
+  index: number;
+  showCustomer: boolean;
+}) {
   const form = Form.useFormInstance();
   const { data: options } = useOptions();
   const deviceId = Form.useWatch(["items", index, "deviceId"], form);
@@ -204,6 +212,15 @@ function IpAddressFields({ index }: { index: number }) {
             }}
           />
         </Form.Item>
+        {showCustomer ? (
+          <Form.Item
+            name={[index, "customerId"]}
+            label="绑定客户（可选）"
+            style={{ flex: 1 }}
+          >
+            <CustomerBindingField />
+          </Form.Item>
+        ) : null}
       </Space>
       <Space size={12} style={{ display: "flex" }} align="start">
         <Form.Item name={[index, "deviceId"]} label="设备" style={{ flex: 1 }}>
@@ -252,13 +269,13 @@ export default function IpAddressesPage() {
   const isAdmin = user.role === "ADMIN";
   const { message } = App.useApp();
   const { data: options, mutate: mutateOptions } = useOptions();
-  const initial = useInitialParams("keyword,blockId,deviceId,lineId,create");
+  const initial = useInitialParams("keyword,blockId,deviceId,lineId,create,customerId");
 
   const [keyword, setKeyword] = useState(initial.keyword ?? "");
   const [status, setStatus] = useState<string | undefined>();
   const [role, setRole] = useState<string | undefined>();
   const [supplierId, setSupplierId] = useState<string | undefined>();
-  const [customerId, setCustomerId] = useState<string | undefined>();
+  const [customerId, setCustomerId] = useState<string | undefined>(initial.customerId);
   const [blockId, setBlockId] = useState<string | undefined>(initial.blockId);
   const [deviceId, setDeviceId] = useState<string | undefined>(initial.deviceId);
   const [page, setPage] = useState(1);
@@ -373,6 +390,7 @@ export default function IpAddressesPage() {
     rackId: values.rackId ?? null,
     deviceId: values.deviceId ?? null,
     lineId: values.lineId ?? null,
+    customerId: values.customerId || null,
     isPrimary: Boolean(values.isPrimary),
     dnsName: values.dnsName?.trim() || null,
     description: values.description?.trim() || null,
@@ -710,7 +728,9 @@ export default function IpAddressesPage() {
             form={form}
             batch={!editing}
             defaultItem={defaults()}
-            renderItem={(field) => <IpAddressFields index={field.name} />}
+            renderItem={(field) => (
+              <IpAddressFields index={field.name} showCustomer={!editing} />
+            )}
           />
         </Form>
       </CrudDrawer>

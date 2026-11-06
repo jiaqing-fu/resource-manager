@@ -13,6 +13,7 @@ import {
 } from "@/lib/api";
 import { LINE_STATUS, LINE_TYPES } from "@/lib/enums";
 import { lineSchema } from "@/lib/line-schema";
+import { assignResourceCustomer } from "@/server/services/allocations";
 import { validateTerminations } from "@/server/services/inventory";
 import { resolveSupplierForCreate } from "@/server/services/supplier-requirements";
 import { writeChangeLog } from "@/lib/changelog";
@@ -88,7 +89,7 @@ export async function POST(req: NextRequest) {
       const dup = await tx.line.findUnique({ where: { code: body.code } });
       if (dup) throw new ApiError(409, `线路编号「${body.code}」已存在`, "DUPLICATE_CODE");
       const terms = body.terminations ? await validateTerminations(tx, body.terminations) : [];
-      const line = await tx.line.create({
+      let line = await tx.line.create({
         data: {
           code: body.code,
           name: body.name,
@@ -106,9 +107,26 @@ export async function POST(req: NextRequest) {
         },
         include: {
           supplier: { select: { id: true, name: true } },
+          customer: { select: { id: true, name: true } },
           terminations: { orderBy: { side: "asc" } },
         },
       });
+      if (body.customerId) {
+        await assignResourceCustomer(tx, {
+          resourceType: "line",
+          resourceId: line.id,
+          customerId: body.customerId,
+          notes: "创建资源时绑定",
+        });
+        line = await tx.line.findUniqueOrThrow({
+          where: { id: line.id },
+          include: {
+            supplier: { select: { id: true, name: true } },
+            customer: { select: { id: true, name: true } },
+            terminations: { orderBy: { side: "asc" } },
+          },
+        });
+      }
       await writeChangeLog(tx, {
         user,
         resource: "line",

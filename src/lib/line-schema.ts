@@ -27,6 +27,7 @@ export const lineSchema = z.object({
   type: zEnum(LINE_TYPES, "线路类型").default("internet"),
   status: zEnum(LINE_STATUS, "线路状态").default("active"),
   supplierId: nullableId,
+  customerId: nullableId,
   bandwidthMbps: nonNegativeInt,
   monthlyFeeCents: nonNegativeInt,
   circuitNo: optionalText(100),
